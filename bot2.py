@@ -2153,6 +2153,27 @@ def get_user_active_loans(uid: str) -> list:
         for r in results
     ]
 
+def get_user_total_debt(uid: str) -> dict:
+    """Get total debt per currency for a user."""
+    results = db_execute(
+        "SELECT currency, SUM(total_due) FROM bank_loans "
+        "WHERE user_id = %s AND collected = false GROUP BY currency",
+        (str(uid),), fetch=True
+    )
+    debt = {"butts": 0, "real_cigarettes": 0, "rubles": 0}
+    if results:
+        for r in results:
+            debt[r[0]] = r[1]
+    return debt
+
+def has_active_loans(uid: str) -> bool:
+    """Check if user has any active loans."""
+    results = db_execute(
+        "SELECT 1 FROM bank_loans WHERE user_id = %s AND collected = false LIMIT 1",
+        (str(uid),), fetch=True, fetch_one=True
+    )
+    return results is not None
+
 def get_user_active_deposits(uid: str) -> list:
     results = db_execute(
         "SELECT id, currency, amount, yield_rate, deposited_at "
@@ -2182,11 +2203,52 @@ def collect_bank_loan(loan_id: int, user_id: str, currency: str, total_due: int)
     bank_force_debit(user_id, currency, total_due)
     db_execute("UPDATE bank_loans SET collected = true WHERE id = %s", (loan_id,))
 
+def repay_bank_loan(uid: str, loan_id: int) -> tuple[bool, str]:
+    """Repay a specific loan early."""
+    results = db_execute(
+        "SELECT id, currency, total_due FROM bank_loans "
+        "WHERE id = %s AND user_id = %s AND collected = false",
+        (loan_id, str(uid)), fetch=True, fetch_one=True
+    )
+    if not results:
+        return False, "❌ Кредит не найден или уже погашен."
+    
+    loan_currency = results[1]
+    amount_due = results[2]
+    
+    # Check if user has enough balance
+    balance = _get_user_currency_balance(uid, loan_currency)
+    if balance < amount_due:
+        _, label, _ = BANK_CURRENCY_LABELS[loan_currency]
+        unit = "₽" if loan_currency == "rubles" else label
+        return False, f"❌ Недостаточно средств.\nНужно: <b>{amount_due} {unit}</b>\nУ тебя: <b>{balance} {unit}</b>"
+    
+    # Deduct from user and mark as collected
+    _set_user_currency_balance(uid, loan_currency, balance - amount_due)
+    bank_add_currency(loan_currency, amount_due)
+    db_execute("UPDATE bank_loans SET collected = true WHERE id = %s", (loan_id,))
+    
+    _, label, _ = BANK_CURRENCY_LABELS[loan_currency]
+    unit = "₽" if loan_currency == "rubles" else label
+    return True, f"✅ Кредит #{loan_id} погашен!\nСписано: <b>{amount_due} {unit}</b>"
+
 def issue_bank_loan(uid: str, currency: str, amount: int) -> tuple[bool, str]:
     if amount <= 0:
         return False, "Сумма должна быть больше 0."
     if currency not in BANK_CURRENCY_KEYS:
         return False, "Валюта: <b>o</b>, <b>c</b> или <b>r</b>."
+    
+    # Check if user has active loans
+    if has_active_loans(uid):
+        return False, "❌ У тебя есть активные кредиты. Погаси их прежде чем брать новые.\nИспользуй /pay для досрочного погашения."
+    
+    # Check credit limits: 200 окурков, 2 сигареты, 1 рубль
+    max_limits = {"butts": 200, "real_cigarettes": 2, "rubles": 1}
+    if amount > max_limits.get(currency, 0):
+        _, label, _ = BANK_CURRENCY_LABELS[currency]
+        max_label = f"{max_limits[currency]} {label}" if currency != "rubles" else f"{max_limits[currency]}₽"
+        return False, f"❌ Лимит кредита: <b>{max_label}</b>.\nЗапрос: {amount}."
+    
     if not bank_take_currency(currency, amount):
         _, label, _ = BANK_CURRENCY_LABELS[currency]
         return False, f"В банке недостаточно {label} для кредита."
@@ -2351,32 +2413,6 @@ def format_bank_board(uid: str) -> str:
     deposit_yield = get_bank_deposit_yield_pct()
     reserve_total = int(get_bank_total_butts_equiv())
 
-    loans = get_user_active_loans(uid)
-    deposits = get_user_active_deposits(uid)
-
-    loan_lines = ""
-    if loans:
-        loan_lines = "\n\n📋 <b>Твои кредиты:</b>\n"
-        for ln in loans:
-            _, label, _ = BANK_CURRENCY_LABELS[ln["currency"]]
-            due = datetime.fromtimestamp(ln["due_at"]).strftime("%d.%m.%Y %H:%M")
-            unit = "₽" if ln["currency"] == "rubles" else label
-            loan_lines += f"  • #{ln['id']}: вернуть <b>{ln['total_due']}</b> {unit} до {due}\n"
-
-    deposit_lines = ""
-    if deposits:
-        deposit_lines = "\n\n🏦 <b>Твои вклады:</b>\n"
-        now = time.time()
-        for dep in deposits:
-            _, label, _ = BANK_CURRENCY_LABELS[dep["currency"]]
-            unit = "₽" if dep["currency"] == "rubles" else label
-            unlock = dep["deposited_at"] + BANK_DEPOSIT_TERM_SECONDS
-            status = "✅ можно вывести" if now >= unlock else f"⏳ до {datetime.fromtimestamp(unlock).strftime('%d.%m.%H:%M')}"
-            deposit_lines += (
-                f"  • #{dep['id']}: <b>{dep['amount']}</b> {unit} "
-                f"({dep['yield_rate']}%) — {status}\n"
-            )
-
     return (
         "🏦 <b>ЦЕНТРОБАНК</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2396,8 +2432,48 @@ def format_bank_board(uid: str) -> str:
         f"📈 Доходность вклада (3 дн.): <b>{deposit_yield}%</b>\n"
         "<i>Мало денег в банке → выше комиссия и кредит, выше доход вклада.\n"
         "Много денег → ниже комиссия и кредит, ниже доход вклада.</i>"
-        f"{loan_lines}{deposit_lines}"
     )
+
+
+def format_loans_board(uid: str) -> str:
+    loans = get_user_active_loans(uid)
+    
+    if not loans:
+        return "✅ <b>У тебя нет активных кредитов</b>\n\n" \
+               "Используй /bank для просмотра основной информации."
+    
+    lines = "📋 <b>Твои активные кредиты:</b>\n\n"
+    for ln in loans:
+        _, label, _ = BANK_CURRENCY_LABELS[ln["currency"]]
+        due = datetime.fromtimestamp(ln["due_at"]).strftime("%d.%m.%Y %H:%M")
+        unit = "₽" if ln["currency"] == "rubles" else label
+        lines += f"• #{ln['id']}: вернуть <b>{ln['total_due']}</b> {unit} до {due}\n"
+    
+    lines += "\n<i>Для досрочного погашения используй /pay &lt;номер_кредита&gt;</i>"
+    return lines
+
+
+def format_deposits_board(uid: str) -> str:
+    deposits = get_user_active_deposits(uid)
+    now = time.time()
+    
+    if not deposits:
+        return "✅ <b>У тебя нет активных вкладов</b>\n\n" \
+               "Используй /bank для просмотра основной информации."
+    
+    lines = "🏦 <b>Твои активные вклады:</b>\n\n"
+    for dep in deposits:
+        _, label, _ = BANK_CURRENCY_LABELS[dep["currency"]]
+        unit = "₽" if dep["currency"] == "rubles" else label
+        unlock = dep["deposited_at"] + BANK_DEPOSIT_TERM_SECONDS
+        status = "✅ можно вывести" if now >= unlock else f"⏳ до {datetime.fromtimestamp(unlock).strftime('%d.%m.%H:%M')}"
+        lines += (
+            f"• #{dep['id']}: <b>{dep['amount']}</b> {unit} "
+            f"({dep['yield_rate']}%) — {status}\n"
+        )
+    
+    lines += "\n<i>Для вывода используй кнопку 'Вывести вклад' в /bank</i>"
+    return lines
 
 def generate_bank_chart() -> Optional[bytes]:
     cb = get_central_bank()
@@ -2439,6 +2515,10 @@ def bank_keyboard() -> types.InlineKeyboardMarkup:
     markup.add(
         types.InlineKeyboardButton("💳 Кредит", callback_data="bank:loan"),
         types.InlineKeyboardButton("🏦 Вклад", callback_data="bank:deposit"),
+    )
+    markup.add(
+        types.InlineKeyboardButton("📋 Мои кредиты", callback_data="bank:my_loans"),
+        types.InlineKeyboardButton("🏦 Мои вклады", callback_data="bank:my_deposits"),
     )
     markup.add(
         types.InlineKeyboardButton("💰 Вывести вклад", callback_data="bank:withdraw"),
@@ -4701,6 +4781,64 @@ def cmd_bank(message: types.Message):
     )
 
 
+@bot.message_handler(commands=["loans"])
+def cmd_loans(message: types.Message):
+    uid = get_uid(message)
+    increment_stat(uid, "commands")
+    log_cmd(uid, message.from_user.username or "unknown", "loans")
+    text = format_loans_board(uid)
+    bot.send_message(
+        message.chat.id, text, parse_mode="HTML",
+        reply_to_message_id=message.message_id,
+        message_thread_id=get_message_thread_id(message),
+    )
+
+
+@bot.message_handler(commands=["deposits"])
+def cmd_deposits(message: types.Message):
+    uid = get_uid(message)
+    increment_stat(uid, "commands")
+    log_cmd(uid, message.from_user.username or "unknown", "deposits")
+    text = format_deposits_board(uid)
+    bot.send_message(
+        message.chat.id, text, parse_mode="HTML",
+        reply_to_message_id=message.message_id,
+        message_thread_id=get_message_thread_id(message),
+    )
+
+
+@bot.message_handler(commands=["pay"])
+def cmd_pay(message: types.Message):
+    uid = get_uid(message)
+    increment_stat(uid, "commands")
+    log_cmd(uid, message.from_user.username or "unknown", "pay")
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        bot.reply_to(
+            message,
+            "💳 <b>Досрочное погашение кредита</b>\n\n"
+            "Использование: <code>/pay &lt;номер_кредита&gt;</code>\n\n"
+            "Пример: <code>/pay 5</code> — погасить кредит #5\n\n"
+            "Узнай номер кредита через /loans",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        loan_id = int(parts[1].strip())
+    except ValueError:
+        bot.reply_to(message, "❌ Номер кредита должен быть числом.", parse_mode="HTML")
+        return
+    
+    ok, result = repay_bank_loan(uid, loan_id)
+    log_cmd(uid, message.from_user.username or "unknown", "pay", f"#{loan_id} {'OK' if ok else 'FAIL'}")
+    bot.reply_to(message, result, parse_mode="HTML")
+    if ok:
+        send_bank_message(message.chat.id, uid, reply_to=message.message_id,
+                          thread_id=get_message_thread_id(message))
+
+
 @bot.message_handler(commands=["to_cig"])
 def cmd_to_cig(message: types.Message):
     uid = get_uid(message)
@@ -4765,6 +4903,16 @@ def callback_bank(call: types.CallbackQuery):
         bot.send_message(chat_id, result, parse_mode="HTML", **reply_kw)
         if ok:
             send_bank_message(chat_id, uid, thread_id=thread_id)
+        return
+
+    if action == "my_loans":
+        text = format_loans_board(uid)
+        bot.send_message(chat_id, text, parse_mode="HTML", **reply_kw)
+        return
+
+    if action == "my_deposits":
+        text = format_deposits_board(uid)
+        bot.send_message(chat_id, text, parse_mode="HTML", **reply_kw)
         return
 
     prompts = {
