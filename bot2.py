@@ -3657,17 +3657,17 @@ def parse_remind_time(time_str: str) -> Optional[int]:
 TERMS_OF_USE_URL = "https://weirdmaan.ru/terms"  # Замените на ваш URL с Terms of Use
 
 def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
-    """Создает клавиатуру для меню /start с постраничной навигацией."""
+    """Создает красивую клавиатуру для меню /start с постраничной навигацией."""
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if page == 0:
         # Страница 1: Основные команды
         markup.add(
-            types.InlineKeyboardButton("🤖 AI", callback_data="start_help:0"),
-            types.InlineKeyboardButton("🎮 Игры", callback_data="start_help:1"),
+            types.InlineKeyboardButton("🤖 AI помощник", callback_data="start_help:0"),
+            types.InlineKeyboardButton("🎮 Игры и развлечения", callback_data="start_help:1"),
         )
         markup.add(
-            types.InlineKeyboardButton("💰 Экономика", callback_data="start_help:2"),
+            types.InlineKeyboardButton("💰 Экономика и банк", callback_data="start_help:2"),
             types.InlineKeyboardButton("🛠️ Инструменты", callback_data="start_help:3"),
         )
         markup.add(
@@ -3676,12 +3676,15 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
     else:
         # Страница 2: Админ и прочее
         markup.add(
-            types.InlineKeyboardButton("👑 Админ", callback_data="start_help:4"),
-            types.InlineKeyboardButton("📊 Статистика", callback_data="start_help:5"),
+            types.InlineKeyboardButton("👑 Администрирование", callback_data="start_help:4"),
+            types.InlineKeyboardButton("📊 Статистика и топы", callback_data="start_help:5"),
         )
         markup.add(
             types.InlineKeyboardButton("⬅️ Назад", callback_data="start_page:0"),
         )
+    
+    # Разделитель
+    markup.add(types.InlineKeyboardButton("━━━━━━━━━━━━━━", callback_data="start_help:divider"))
     
     # Кнопка Terms of Use всегда внизу
     markup.add(
@@ -3761,20 +3764,72 @@ def callback_start_page(call: types.CallbackQuery):
         log_err("START_PAGE", str(e))
 
 
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("start_help:"))
 def callback_start_help(call: types.CallbackQuery):
     """Обработчик кнопок помощи из меню /start."""
     category = call.data.split(":")[1]
     help_texts = {
-        "0": "🤖 <b>AI команды:</b>\n/ai — задать вопрос\n/role — выбрать роль\n/img — генерация картинок\n/tts — озвучка текста",
-        "1": "🎮 <b>Игры:</b>\n/roulette — русская рулетка\n/mines — mines\n/spin — колесо фортуны",
-        "2": "💰 <b>Экономика:</b>\n/bank — кредиты и вклады\n/wallet — кошелек\n/crypto — биржа",
-        "3": "🛠️ <b>Инструменты:</b>\n/qr — QR-коды\n/weather — погода\n/translate — перевод",
-        "4": "👑 <b>Админ:</b>\n/ban, /unban, /mute\n/promo — промокоды",
-        "5": "📊 <b>Статистика:</b>\n/stats — твоя статистика\n/top — рейтинг\n/about — о боте",
+        "0": (
+            "🤖 <b>AI помощник:</b>\n\n"
+            "/gen — генерация изображений по описанию\n"
+            "/tts — озвучка текста голосом\n"
+            "/role — выбор роли для AI\n"
+            "/ai — задать вопрос искусственному интеллекту"
+        ),
+        "1": (
+            "🎮 <b>Игры и развлечения:</b>\n\n"
+            "/roulette — русская рулетка на выживание\n"
+            "/mines — игра Mines с множителями\n"
+            "/cr — игра Crash с выводом выигрыша\n"
+            "/bj — Blackjack (21) против дилера\n"
+            "/dice — бросок кубика\n"
+            "/ship — проверка совместимости"
+        ),
+        "2": (
+            "💰 <b>Экономика и банк:</b>\n\n"
+            "/bank — банковское меню\n"
+            "/loans — ваши активные кредиты\n"
+            "/deposits — ваши активные вклады\n"
+            "/pay — досрочное погашение кредита\n"
+            "/wallet — ваш кошелек\n"
+            "/birja — крипто-биржа окурков\n"
+            "/to_cig — конвертация в сигареты\n"
+            "/to_rub — конвертация в рубли"
+        ),
+        "3": (
+            "🛠️ <b>Инструменты:</b>\n\n"
+            "/qr — создание QR-кодов\n"
+            "/weather — погода в любом городе\n"
+            "/translate — перевод текста\n"
+            "/meme — создание мемов\n"
+            "/reverse, /blur, /sepia — фильтры для фото"
+        ),
+        "4": (
+            "👑 <b>Администрирование:</b>\n\n"
+            "/ban — забанить пользователя\n"
+            "/unban — разбанить пользователя\n"
+            "/mute — заглушить пользователя\n"
+            "/unmute — снять заглушку\n"
+            "/warn — выдать предупреждение\n"
+            "/promo — создание промокодов"
+        ),
+        "5": (
+            "📊 <b>Статистика и топы:</b>\n\n"
+            "/stats — ваша личная статистика\n"
+            "/leaderboard — топ по репутации\n"
+            "/top_chat — топ активных в чате\n"
+            "/top_bot — топ пользователей бота\n"
+            "/about — информация о боте"
+        ),
+        "divider": "",
     }
-    text = help_texts.get(category, "Неизвестная категория")
-    bot.answer_callback_query(call.id, text, show_alert=True)
+    text = help_texts.get(category, "ℹ️ Выберите категорию в меню")
+    if text:
+        bot.answer_callback_query(call.id, text, show_alert=True)
+    else:
+        bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(commands=["start"])
