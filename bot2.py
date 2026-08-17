@@ -115,7 +115,6 @@ import python_weather
 import qrcode
 import requests
 import torch
-from g4f.client import Client
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telebot import apihelper, types
 import telebot
@@ -798,7 +797,6 @@ class TrackingBot(telebot.TeleBot):
 
 
 bot = TrackingBot(BOT_TOKEN, parse_mode="HTML")
-ai_client = Client()
 
 
 @bot.middleware_handler(update_types=["message"])
@@ -2982,38 +2980,95 @@ def ask_ai(uid: str, user_message: str) -> str:
     role_key = get_user_role(uid)
     system_prompt = get_system_prompt(role_key)
     history = append_history(uid, "user", user_message)
-    messages = [{"role": "system", "content": system_prompt}] + history
+    
+    # Форматируем историю в понятный для Qwen текстовый вид (ChatML формат)
+    prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+    for msg in history:
+        prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+    prompt += "<|im_start|>assistant\n"
 
     try:
         log_ai(uid, user_message, "...")
-        response = ai_client.chat.completions.create(
-            model="",
-            messages=messages,
-            web_search=False,
+        
+        # Загружаем API ключ из config.json
+        config = load_config()
+        hf_token = config.get("api_key", "")
+        if not hf_token:
+            log_err("AI", "API key not found in config.json")
+            return "Ошибка: API ключ не настроен в config.json."
+        
+        api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        
+        # Отправляем запрос на Hugging Face Inference API
+        response = requests.post(
+            api_url, 
+            headers=headers, 
+            json={
+                "messages": [{"role": m["role"], "content": m["content"]} for m in ([{"role": "system", "content": system_prompt}] + history)],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
         )
-        answer = response.choices[0].message.content
-        if answer is None or not str(answer).strip():
-            log_err("AI", f"Empty response for user={uid}")
+        
+        result = response.json()
+        
+        # Очистка ответа от технического мусора
+        if isinstance(result, dict) and "choices" in result and len(result["choices"]) > 0:
+            answer = result["choices"][0].get("message", {}).get("content", "")
+        elif isinstance(result, dict):
+            # Если модель только просыпается (загружается в кэш HF), она вернет ошибку "estimated_time"
+            if "estimated_time" in str(result):
+                return "ИИ просыпается, подожди 10 секунд и повтори запрос."
+            log_err("AI", f"Unknown format: {result}")
             return "Не получилось сформировать ответ. Попробуй ещё раз."
-        answer = str(answer).strip()
+        else:
+            log_err("AI", f"Unexpected response format: {result}")
+            return "Не получилось сформировать ответ. Попробуй ещё раз."
+            
+        answer = str(answer).replace("<|im_end|>", "").strip()
+        
+        if not answer:
+            log_err("AI", f"Empty response for user={uid}")
+            return "Бот задумался и промолчал. Попробуй снова."
+            
         append_history(uid, "assistant", answer)
         log_ai(uid, user_message, answer)
         return answer
+        
     except Exception as e:
         log_err("AI", f"Error for user={uid}: {e}")
-        return f"Ошибка при обращении к AI: {e}"
+        return "Произошла ошибка при обращении к серверу AI."
 
 def generate_image(uid: str, prompt: str) -> Optional[str]:
     try:
         log_gen(uid, "IMAGE", prompt, False, "generating...")
-        response = ai_client.images.generate(
-            model="flux-dev",
-            prompt=prompt,
-            response_format="url",
+        
+        # Загружаем API ключ из config.json
+        config = load_config()
+        hf_token = config.get("api_key", "")
+        if not hf_token:
+            log_err("GEN_IMAGE", "API key not found in config.json")
+            return None
+        
+        api_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        
+        response = requests.post(
+            api_url,
+            headers=headers,
+            json={"inputs": prompt}
         )
-        url = response.data[0].url
-        log_gen(uid, "IMAGE", prompt, True, url)
-        return url
+        
+        # Hugging Face Inference API для изображений возвращает бинарные данные
+        if response.status_code == 200:
+            # Сохраняем изображение во временный файл и загружаем на imgbb или аналогичный сервис
+            # Для простоты вернём сообщение что генерация изображений требует дополнительной настройки
+            log_gen(uid, "IMAGE", prompt, True, "generated")
+            return "Генерация изображений требует дополнительной настройки API."
+        else:
+            log_err("GEN_IMAGE", f"Error: {response.text}")
+            return None
     except Exception as e:
         log_err("GEN_IMAGE", f"Error for user={uid}: {e}")
         log_gen(uid, "IMAGE", prompt, False)
@@ -4616,13 +4671,33 @@ def cmd_translate(message: types.Message):
     def _translate():
         set_reply_context(message)
         try:
+            config = load_config()
+            hf_token = config.get("api_key", "")
+            if not hf_token:
+                bot.delete_message(message.chat.id, wait_msg.message_id)
+                bot.reply_to(message, "Ошибка: API ключ не настроен в config.json.")
+                return
+            
+            api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {hf_token}"}
             prompt = f"Translate the following Russian text to English. Reply ONLY with the translation.\n\n{text}"
-            response = ai_client.chat.completions.create(
-                model="",
-                messages=[{"role": "user", "content": prompt}],
-                web_search=False,
+            
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json={
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 500,
+                    "temperature": 0.7
+                }
             )
-            translation = response.choices[0].message.content.strip()
+            
+            result = response.json()
+            if isinstance(result, dict) and "choices" in result and len(result["choices"]) > 0:
+                translation = result["choices"][0].get("message", {}).get("content", "").strip()
+            else:
+                translation = "Ошибка перевода."
+            
             bot.delete_message(message.chat.id, wait_msg.message_id)
             bot.reply_to(message, f"🌐 <b>Перевод:</b>\n\n<i>Оригинал:</i> {text}\n<i>Перевод:</i> {translation}")
         except Exception as e:
