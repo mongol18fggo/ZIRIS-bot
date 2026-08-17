@@ -3654,7 +3654,7 @@ def parse_remind_time(time_str: str) -> Optional[int]:
 # Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TERMS_OF_USE_URL = "https://weirdmaan.ru/terms"  # Замените на ваш URL с Terms of Use
+TERMS_OF_USE_URL = "https://ziris.zorgv.su/terms.txt"  # Замените на ваш URL с Terms of Use
 
 def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
     """Создает красивую клавиатуру для меню /start с постраничной навигацией (20 команд на страницу)."""
