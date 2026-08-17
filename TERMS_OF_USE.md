@@ -1,4 +1,4 @@
-# Условия использования (Terms of Use) бота "Cigarette Bank"
+# Условия использования (Terms of Use) бота "ZIRIS | Golden Days"
 
 **Последнее обновление:** 2024-01-01
 
