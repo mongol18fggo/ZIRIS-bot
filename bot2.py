@@ -3653,6 +3653,130 @@ def parse_remind_time(time_str: str) -> Optional[int]:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
+
+TERMS_OF_USE_URL = "https://weirdmaan.ru/terms"  # Замените на ваш URL с Terms of Use
+
+def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
+    """Создает клавиатуру для меню /start с постраничной навигацией."""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    if page == 0:
+        # Страница 1: Основные команды
+        markup.add(
+            types.InlineKeyboardButton("🤖 AI", callback_data="start_help:0"),
+            types.InlineKeyboardButton("🎮 Игры", callback_data="start_help:1"),
+        )
+        markup.add(
+            types.InlineKeyboardButton("💰 Экономика", callback_data="start_help:2"),
+            types.InlineKeyboardButton("🛠️ Инструменты", callback_data="start_help:3"),
+        )
+        markup.add(
+            types.InlineKeyboardButton("➡️ Далее", callback_data="start_page:1"),
+        )
+    else:
+        # Страница 2: Админ и прочее
+        markup.add(
+            types.InlineKeyboardButton("👑 Админ", callback_data="start_help:4"),
+            types.InlineKeyboardButton("📊 Статистика", callback_data="start_help:5"),
+        )
+        markup.add(
+            types.InlineKeyboardButton("⬅️ Назад", callback_data="start_page:0"),
+        )
+    
+    # Кнопка Terms of Use всегда внизу
+    markup.add(
+        types.InlineKeyboardButton("📜 Условия использования", url=TERMS_OF_USE_URL),
+    )
+    
+    return markup
+
+
+def get_start_text(page: int = 0, name: str = "друг") -> str:
+    """Возвращает текст для определенной страницы меню /start."""
+    if page == 0:
+        return (
+            f"👋 Привет, <b>{name}</b>! Я AI-бот.\n\n"
+            "Я умею общаться, генерировать картинки, озвучивать текст,\n"
+            "играть в рулетку, создавать мемы, QR-коды и многое другое.\n\n"
+            "<b>📋 ОСНОВНЫЕ КОМАНДЫ (1/2)</b>\n"
+            f"{chr(39)*30}\n"
+            "<b>🤖 AI:</b>\n"
+            "/ai — задать вопрос AI\n"
+            "/role — выбрать роль AI\n"
+            "/img — сгенерировать изображение\n"
+            "/tts — озвучить текст\n\n"
+            "<b>🎮 Игры:</b>\n"
+            "/roulette — русская рулетка\n"
+            "/mines — игра Mines\n"
+            "/spin — колесо фортуны\n\n"
+            "<b>💰 Экономика:</b>\n"
+            "/bank — Центробанк (кредиты/вклады)\n"
+            "/wallet — твой кошелек\n"
+            "/crypto — криптобиржа\n\n"
+            "Нажми ➡️ для продолжения 👇"
+        )
+    else:
+        return (
+            f"<b>📋 ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ (2/2)</b>\n"
+            f"{chr(39)*30}\n"
+            "<b>🛠️ Инструменты:</b>\n"
+            "/qr — создать QR-код\n"
+            "/weather — погода\n"
+            "/translate — перевод\n"
+            "/meme — создать мем\n\n"
+            "<b>👑 Админ:</b>\n"
+            "/ban — забанить\n"
+            "/unban — разбанить\n"
+            "/mute — замутить\n"
+            "/promo — создать промокод\n\n"
+            "<b>📊 Статистика:</b>\n"
+            "/stats — твоя статистика\n"
+            "/top — топ пользователей\n"
+            "/about — о боте\n\n"
+            "Нажми ⬅️ чтобы вернуться 👇"
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("start_page:"))
+def callback_start_page(call: types.CallbackQuery):
+    """Обработчик переключения страниц меню /start."""
+    uid = str(call.from_user.id)
+    page = int(call.data.split(":")[1])
+    name = call.from_user.first_name or "друг"
+    
+    bot.answer_callback_query(call.id)
+    
+    text = get_start_text(page, name)
+    markup = start_menu_keyboard(page)
+    
+    try:
+        bot.edit_message_text(
+            text,
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception as e:
+        log_err("START_PAGE", str(e))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("start_help:"))
+def callback_start_help(call: types.CallbackQuery):
+    """Обработчик кнопок помощи из меню /start."""
+    category = call.data.split(":")[1]
+    help_texts = {
+        "0": "🤖 <b>AI команды:</b>\n/ai — задать вопрос\n/role — выбрать роль\n/img — генерация картинок\n/tts — озвучка текста",
+        "1": "🎮 <b>Игры:</b>\n/roulette — русская рулетка\n/mines — mines\n/spin — колесо фортуны",
+        "2": "💰 <b>Экономика:</b>\n/bank — кредиты и вклады\n/wallet — кошелек\n/crypto — биржа",
+        "3": "🛠️ <b>Инструменты:</b>\n/qr — QR-коды\n/weather — погода\n/translate — перевод",
+        "4": "👑 <b>Админ:</b>\n/ban, /unban, /mute\n/promo — промокоды",
+        "5": "📊 <b>Статистика:</b>\n/stats — твоя статистика\n/top — рейтинг\n/about — о боте",
+    }
+    text = help_texts.get(category, "Неизвестная категория")
+    bot.answer_callback_query(call.id, text, show_alert=True)
+
+
 @bot.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
     uid = get_uid(message)
@@ -3666,26 +3790,11 @@ def cmd_start(message: types.Message):
     increment_stat(uid, "commands")
     set_first_message_if_null(uid)
 
-    # У вас в тексте была незакрытая строка (ошибка синтаксиса), исправил:
-    bot.reply_to(message,
-        f"Привет, <b>{name}</b>! Я AI-бот.\n\n"
-        "Я умею общаться, генерировать картинки, озвучивать текст, "
-        "играть в рулетку, создавать мемы, QR-коды и многое другое.\n\n"
-        "Просто пиши мне — и я отвечу!\n"
-        "Список всех команд — в следующих сообщениях 👇"
-    )
-
-    # Изменено: send_message заменен на reply_to
-    bot.reply_to(message,
-        f"📋 <b>Список команд (1/2)</b>\n"
-        f"{'—' * 30}{format_commands_part1()}"
-    )
-
-    # Изменено: send_message заменен на reply_to
-    bot.reply_to(message,
-        f"📋 <b>Список команд (2/2)</b>\n"
-        f"{'—' * 30}{format_commands_part2()}"
-    )
+    # Отправляем меню с кнопками
+    text = get_start_text(0, name)
+    markup = start_menu_keyboard(0)
+    
+    bot.reply_to(message, text, parse_mode="HTML", reply_markup=markup)
 
 
 @bot.message_handler(commands=["about"])
