@@ -3657,8 +3657,8 @@ def parse_remind_time(time_str: str) -> Optional[int]:
 TERMS_OF_USE_URL = "https://ziris.zorgv.su/terms.txt"  # Замените на ваш URL с Terms of Use
 
 def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
-    """Создает красивую клавиатуру для меню /start с постраничной навигацией (20 команд на страницу)."""
-    markup = types.InlineKeyboardMarkup(row_width=1)
+    """Создает клавиатуру для меню /start только с 3 кнопками навигации."""
+    markup = types.InlineKeyboardMarkup(row_width=3)
     
     # Все команды бота с описаниями (78 команд)
     all_commands = [
@@ -3746,15 +3746,6 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
     page_size = 20
     total_pages = math.ceil(len(all_commands) / page_size)
     
-    # Получаем команды для текущей страницы
-    start_idx = page * page_size
-    end_idx = min((page + 1) * page_size, len(all_commands))
-    current_commands = all_commands[start_idx:end_idx]
-    
-    # Добавляем кнопки с командами (текст + микро описание)
-    for cmd, desc in current_commands:
-        markup.add(types.InlineKeyboardButton(f"/{cmd} — {desc}", callback_data=f"start_cmd:{cmd}"))
-    
     # Навигация: только 3 кнопки - Назад, Далее, Terms of Use
     nav_row = []
     if page > 0:
@@ -3762,20 +3753,107 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
     if page < total_pages - 1:
         nav_row.append(types.InlineKeyboardButton("➡️", callback_data=f"start_page:{page+1}"))
     
-    if nav_row:
-        markup.add(*nav_row)
+    nav_row.append(types.InlineKeyboardButton("📜 Условия использования", url=TERMS_OF_USE_URL))
     
-    # Кнопка Terms of Use всегда внизу
-    markup.add(
-        types.InlineKeyboardButton("📜 Условия использования", url=TERMS_OF_USE_URL),
-    )
+    markup.add(*nav_row)
     
     return markup
 
 
 def get_start_text(page: int = 0, name: str = "друг") -> str:
-    """Возвращает текст для определенной страницы меню /start."""
-    total_pages = math.ceil(78 / 20)  # 78 команд, по 20 на страницу
+    """Возвращает текст для определенной страницы меню /start со списком команд."""
+    # Все команды бота с описаниями
+    all_commands = [
+        ("8ball", "Магический шар предсказаний"),
+        ("about", "Информация о боте"),
+        ("balance", "Проверить баланс"),
+        ("ban", "Забанить пользователя"),
+        ("bank", "Банк: вклады, кредиты"),
+        ("beggar", "Попрошайничать"),
+        ("birja", "Крипто-биржа окурков"),
+        ("bj", "Блэкджек"),
+        ("blackwhite", "Ч/б фильтр"),
+        ("blur", "Размыть изображение"),
+        ("brown", "Коричневый фильтр"),
+        ("buy_cigarettes", "Купить сигареты"),
+        ("choose", "Случайный выбор"),
+        ("cigar_to_clan", "Передать сигарету клану"),
+        ("clan", "Инфо о клане"),
+        ("clans", "Список кланов"),
+        ("clear", "Очистить историю"),
+        ("cr", "Crash игра"),
+        ("create_clan", "Создать клан"),
+        ("create_promo", "Создать промокод"),
+        ("create_role", "Создать роль"),
+        ("create_virus", "Создать вирус"),
+        ("delbot", "Удалить сообщения бота"),
+        ("delete_clan", "Удалить клан"),
+        ("delete_role", "Удалить роль"),
+        ("delete_virus", "Удалить вирус"),
+        ("delremind", "Удалить напоминание"),
+        ("deposits", "Мои вклады"),
+        ("dice", "Бросить кубик"),
+        ("enemy_list", "Список врагов"),
+        ("gen", "Генерация изображения"),
+        ("invert", "Инвертировать цвета"),
+        ("join_clan", "Вступить в клан"),
+        ("jpeg", "Ухудшить качество"),
+        ("lab", "Лаборатория вируса"),
+        ("leaderboard", "Топ игроков"),
+        ("leave_clan", "Покинуть клан"),
+        ("loans", "Мои кредиты"),
+        ("meme", "Создать мем"),
+        ("mines", "Мины игра"),
+        ("mute", "Замутить пользователя"),
+        ("pay", "Досрочное погашение кредита"),
+        ("ping", "Проверка задержки"),
+        ("pizdec", "Режим хаоса"),
+        ("promo", "Активировать промокод"),
+        ("qr", "Создать QR-код"),
+        ("quote", "Цитата из сообщения"),
+        ("remind", "Создать напоминание"),
+        ("reminders", "Список напоминаний"),
+        ("reverse", "Перевернуть текст"),
+        ("revive", "Возродиться"),
+        ("roles", "Список ролей"),
+        ("roulette", "Русская рулетка"),
+        ("say", "Заставить бота сказать"),
+        ("send_item", "Передать предмет"),
+        ("sepia", "Эффект сепии"),
+        ("shhh", "Тихий режим"),
+        ("ship", "Совместимость"),
+        ("smoke", "Выкурить сигарету"),
+        ("start", "Главное меню"),
+        ("stats", "Твоя статистика"),
+        ("to_award", "Конвертировать в награды"),
+        ("to_cig", "Окурки → сигареты"),
+        ("to_rub", "Окурки → рубли"),
+        ("top_bot", "Топ пользователей бота"),
+        ("top_chat", "Топ пользователей чата"),
+        ("translate", "Перевести текст"),
+        ("trash", "Найти окурок"),
+        ("trash_to_clan", "Передать окурки клану"),
+        ("tts", "Текст в речь"),
+        ("unban", "Разбанить"),
+        ("unmute", "Размутить"),
+        ("unwarn", "Снять предупреждение"),
+        ("virus", "Заразить пользователя"),
+        ("vsem", "Рассылка всем"),
+        ("wallet", "Кошелёк криптовалюты"),
+        ("warn", "Предупредить"),
+        ("weather", "Узнать погоду")
+    ]
+    
+    total_pages = math.ceil(len(all_commands) / 20)
+    
+    # Получаем команды для текущей страницы
+    page_size = 20
+    start_idx = page * page_size
+    end_idx = min((page + 1) * page_size, len(all_commands))
+    current_commands = all_commands[start_idx:end_idx]
+    
+    # Формируем список команд текстом
+    commands_list = "\n".join([f"/{cmd} — {desc}" for cmd, desc in current_commands])
     
     if page == 0:
         return (
@@ -3783,18 +3861,18 @@ def get_start_text(page: int = 0, name: str = "друг") -> str:
             "Я умею общаться, генерировать картинки, озвучивать текст,\n"
             "играть в рулетку, создавать мемы, QR-коды и многое другое.\n\n"
             f"<b>📋 Список всех команд ({page+1}/{total_pages})</b>\n"
-            f"{'′'*30}\n"
-            "Навигация: ⬅️ Назад | ➡️ Далее\n\n"
-            "Используй кнопки ниже для быстрого доступа к командам.\n"
-            "В самом низу ты найдешь ссылку на Условия использования."
+            f"{'─' * 30}\n\n"
+            f"{commands_list}\n\n"
+            f"{'─' * 30}\n"
+            "Используй кнопки ниже для навигации."
         )
     else:
         return (
             f"<b>📋 Список всех команд ({page+1}/{total_pages})</b>\n"
-            f"{'′'*30}\n"
-            "Навигация: ⬅️ Назад | ➡️ Далее\n\n"
-            "Используй кнопки ниже для быстрого доступа к командам.\n"
-            "В самом низу ты найдешь ссылку на Условия использования."
+            f"{'─' * 30}\n\n"
+            f"{commands_list}\n\n"
+            f"{'─' * 30}\n"
+            "Используй кнопки ниже для навигации."
         )
 
 
