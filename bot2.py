@@ -115,7 +115,7 @@ import python_weather
 import qrcode
 import requests
 import torch
-from g4f.client import Client
+from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telebot import apihelper, types
 import telebot
@@ -798,7 +798,21 @@ class TrackingBot(telebot.TeleBot):
 
 
 bot = TrackingBot(BOT_TOKEN, parse_mode="HTML")
-ai_client = Client()
+
+# Инициализируем чистый клиент OpenRouter (один раз в начале файла, вне функции)
+# Он на 100% совместим с библиотекой openai
+def _get_openrouter_client():
+    config = load_config()
+    api_key = config.get("openrouter_api_key", "")
+    if not api_key:
+        log_err("AI", "OpenRouter API key not found in config.json")
+        return None
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key
+    )
+
+openrouter_client = _get_openrouter_client()
 
 
 @bot.middleware_handler(update_types=["message"])
@@ -2983,25 +2997,33 @@ def ask_ai(uid: str, user_message: str) -> str:
     system_prompt = get_system_prompt(role_key)
     history = append_history(uid, "user", user_message)
     messages = [{"role": "system", "content": system_prompt}] + history
-
+    
     try:
         log_ai(uid, user_message, "...")
-        response = ai_client.chat.completions.create(
-            model="",
-            messages=messages,
-            web_search=False,
+        
+        # Запрос напрямую к OpenRouter без посредничества g4f
+        if openrouter_client is None:
+            log_err("AI", f"OpenRouter client not initialized for user={uid}")
+            return "AI сервис временно недоступен. Попробуйте позже."
+        
+        response = openrouter_client.chat.completions.create(
+            model="meta-llama/llama-3.2-3b-instruct:free",  # Указываем конкретную бесплатную модель
+            messages=messages
         )
+        
         answer = response.choices[0].message.content
         if answer is None or not str(answer).strip():
             log_err("AI", f"Empty response for user={uid}")
             return "Не получилось сформировать ответ. Попробуй ещё раз."
+            
         answer = str(answer).strip()
         append_history(uid, "assistant", answer)
         log_ai(uid, user_message, answer)
         return answer
+        
     except Exception as e:
         log_err("AI", f"Error for user={uid}: {e}")
-        return f"Ошибка при обращении к AI: {e}"
+        return "Произошла ошибка при обращении к AI."
 
 def generate_image(uid: str, prompt: str) -> Optional[str]:
     try:
