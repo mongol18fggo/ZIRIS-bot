@@ -690,11 +690,21 @@ def set_reply_context(message: types.Message) -> None:
     _reply_ctx.thread_id = get_message_thread_id(message)
 
 
+@bot.middleware_handler(update_types=["message"])
+def _reply_context_message(_bot_instance, message: types.Message):
+    set_reply_context(message)
+
+
 def set_reply_context_from_call(call: types.CallbackQuery) -> None:
     msg = call.message
     _reply_ctx.reply_to_id = get_initiator_reply_id(msg) or msg.message_id
     _reply_ctx.chat_id = msg.chat.id
     _reply_ctx.thread_id = get_message_thread_id(msg)
+
+
+@bot.middleware_handler(update_types=["callback_query"])
+def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
+    set_reply_context_from_call(call)
 
 
 def reply_kwargs_for_message(message: types.Message) -> dict:
@@ -799,36 +809,23 @@ class TrackingBot(telebot.TeleBot):
 
 bot = TrackingBot(BOT_TOKEN, parse_mode="HTML")
 
-# Инициализируем чистый клиент OpenRouter (один раз в начале файла, вне функции)
-# Он на 100% совместим с библиотекой openai
-def _get_openrouter_client():
+# Инициализируем токен Hugging Face из config.json
+def _get_hf_token():
     config = load_config()
-    api_key = config.get("openrouter_api_key", "")
-    if not api_key:
-        log_err("AI", "OpenRouter API key not found in config.json")
+    token = config.get("hf_token", "")
+    if not token:
+        log_err("AI", "Hugging Face API token not found in config.json")
         return None
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key
-    )
+    return token
 
-openrouter_client = _get_openrouter_client()
-
-
-@bot.middleware_handler(update_types=["message"])
-def _reply_context_message(_bot_instance, message: types.Message):
-    set_reply_context(message)
-
-
-@bot.middleware_handler(update_types=["callback_query"])
-def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
-    set_reply_context_from_call(call)
-
-# Silero model
-silero_model = None
+HF_TOKEN = _get_hf_token()
+API_URL = "https://huggingface.co/api/inference/"
 
 # In-memory AI chat history (not persisted to DB)
 ai_chat_history: dict[str, list] = {}
+
+# Silero model
+silero_model = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # System Roles (loaded from config.json)
@@ -2996,34 +2993,61 @@ def ask_ai(uid: str, user_message: str) -> str:
     role_key = get_user_role(uid)
     system_prompt = get_system_prompt(role_key)
     history = append_history(uid, "user", user_message)
-    messages = [{"role": "system", "content": system_prompt}] + history
     
+    # Форматируем историю в понятный для Qwen текстовый вид (ChatML формат)
+    prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+    for msg in history:
+        prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+    prompt += "<|im_start|>assistant\n"
+
     try:
         log_ai(uid, user_message, "...")
         
-        # Запрос напрямую к OpenRouter без посредничества g4f
-        if openrouter_client is None:
-            log_err("AI", f"OpenRouter client not initialized for user={uid}")
+        if HF_TOKEN is None:
+            log_err("AI", f"Hugging Face token not initialized for user={uid}")
             return "AI сервис временно недоступен. Попробуйте позже."
         
-        response = openrouter_client.chat.completions.create(
-            model="meta-llama/llama-3.2-3b-instruct:free",  # Указываем конкретную бесплатную модель
-            messages=messages
+        # Отправляем прямой запрос на сервера Hugging Face
+        response = requests.post(
+            API_URL, 
+            headers={"Authorization": f"Bearer {HF_TOKEN}"}, 
+            json={
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 500,
+                    "temperature": 0.7,
+                    "return_full_text": False # Чтобы сервер вернул ТОЛЬКО ответ бота, без истории
+                }
+            }
         )
         
-        answer = response.choices[0].message.content
-        if answer is None or not str(answer).strip():
-            log_err("AI", f"Empty response for user={uid}")
+        result = response.json()
+        
+        # Очистка ответа от технического мусора
+        if isinstance(result, list) and len(result) > 0:
+            answer = result[0].get('generated_text', '')
+        elif isinstance(result, dict) and 'generated_text' in result:
+            answer = result['generated_text']
+        else:
+            # Если модель только просыпается (загружается в кэш HF), она вернет ошибку "estimated_time"
+            if "estimated_time" in str(result):
+                return "ИИ просыпается, подожди 10 секунд и повтори запрос."
+            log_err("AI", f"Unknown format: {result}")
             return "Не получилось сформировать ответ. Попробуй ещё раз."
             
-        answer = str(answer).strip()
+        answer = str(answer).replace("<|im_end|>", "").strip()
+        
+        if not answer:
+            log_err("AI", f"Empty response for user={uid}")
+            return "Бот задумался и промолчал. Попробуй снова."
+            
         append_history(uid, "assistant", answer)
         log_ai(uid, user_message, answer)
         return answer
         
     except Exception as e:
         log_err("AI", f"Error for user={uid}: {e}")
-        return "Произошла ошибка при обращении к AI."
+        return "Произошла ошибка при обращении к серверу AI."
 
 def generate_image(uid: str, prompt: str) -> Optional[str]:
     try:
