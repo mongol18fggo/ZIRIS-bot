@@ -690,21 +690,11 @@ def set_reply_context(message: types.Message) -> None:
     _reply_ctx.thread_id = get_message_thread_id(message)
 
 
-@bot.middleware_handler(update_types=["message"])
-def _reply_context_message(_bot_instance, message: types.Message):
-    set_reply_context(message)
-
-
 def set_reply_context_from_call(call: types.CallbackQuery) -> None:
     msg = call.message
     _reply_ctx.reply_to_id = get_initiator_reply_id(msg) or msg.message_id
     _reply_ctx.chat_id = msg.chat.id
     _reply_ctx.thread_id = get_message_thread_id(msg)
-
-
-@bot.middleware_handler(update_types=["callback_query"])
-def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
-    set_reply_context_from_call(call)
 
 
 def reply_kwargs_for_message(message: types.Message) -> dict:
