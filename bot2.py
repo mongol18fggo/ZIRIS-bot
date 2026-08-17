@@ -3654,34 +3654,54 @@ def parse_remind_time(time_str: str) -> Optional[int]:
 # Handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TERMS_OF_USE_URL = "https://weirdmaan.ru/terms"  # Замените на ваш URL с Terms of Use
+TERMS_OF_USE_URL = "https://ziris.zorgv.su/terms.txt"  # Замените на ваш URL с Terms of Use
 
 def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
-    """Создает клавиатуру для меню /start с постраничной навигацией."""
+    """Создает красивую клавиатуру для меню /start с постраничной навигацией (20 команд на страницу)."""
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    if page == 0:
-        # Страница 1: Основные команды
-        markup.add(
-            types.InlineKeyboardButton("🤖 AI", callback_data="start_help:0"),
-            types.InlineKeyboardButton("🎮 Игры", callback_data="start_help:1"),
-        )
-        markup.add(
-            types.InlineKeyboardButton("💰 Экономика", callback_data="start_help:2"),
-            types.InlineKeyboardButton("🛠️ Инструменты", callback_data="start_help:3"),
-        )
-        markup.add(
-            types.InlineKeyboardButton("➡️ Далее", callback_data="start_page:1"),
-        )
-    else:
-        # Страница 2: Админ и прочее
-        markup.add(
-            types.InlineKeyboardButton("👑 Админ", callback_data="start_help:4"),
-            types.InlineKeyboardButton("📊 Статистика", callback_data="start_help:5"),
-        )
-        markup.add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="start_page:0"),
-        )
+    # Все команды бота (79 команд)
+    all_commands = [
+        "8ball", "about", "balance", "ban", "bank", "beggar", "birja", "bj",
+        "blackjack", "blackwhite", "blur", "brown", "buy_cigarettes", "choose",
+        "cigar_to_clan", "clan", "clans", "clear", "cr", "create_clan",
+        "create_promo", "create_virus", "createrole", "delbot", "delete_clan",
+        "delete_virus", "deleterole", "delremind", "deposits", "dice",
+        "enemy_list", "gen", "invert", "join_clan", "jpeg", "lab",
+        "leaderboard", "leave_clan", "loans", "meme", "mines", "mute",
+        "pay", "ping", "pizdec", "promo", "qr", "quote", "remind",
+        "reminders", "reverse", "revive", "roles", "roulette", "say",
+        "send_item", "sepia", "shhh", "ship", "smoke", "start", "stats",
+        "to_award", "to_cig", "to_rub", "top_bot", "top_chat", "translate",
+        "trash", "trash_to_clan", "tts", "unban", "unmute", "unwarn",
+        "virus", "vsem", "wallet", "warn", "weather"
+    ]
+    
+    # Разбиваем на страницы по 20 команд
+    page_size = 20
+    total_pages = math.ceil(len(all_commands) / page_size)
+    
+    # Получаем команды для текущей страницы
+    start_idx = page * page_size
+    end_idx = min((page + 1) * page_size, len(all_commands))
+    current_commands = all_commands[start_idx:end_idx]
+    
+    # Добавляем кнопки с командами
+    for cmd in current_commands:
+        markup.add(types.InlineKeyboardButton(f"/{cmd}", callback_data=f"start_cmd:{cmd}"))
+    
+    # Навигация
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"start_page:{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("➡️ Далее", callback_data=f"start_page:{page+1}"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    # Разделитель
+    markup.add(types.InlineKeyboardButton("━━━━━━━━━━━━━━", callback_data="start_divider"))
     
     # Кнопка Terms of Use всегда внизу
     markup.add(
@@ -3693,47 +3713,26 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
 
 def get_start_text(page: int = 0, name: str = "друг") -> str:
     """Возвращает текст для определенной страницы меню /start."""
+    total_pages = math.ceil(79 / 20)  # 79 команд, по 20 на страницу
+    
     if page == 0:
         return (
             f"👋 Привет, <b>{name}</b>! Я AI-бот.\n\n"
             "Я умею общаться, генерировать картинки, озвучивать текст,\n"
             "играть в рулетку, создавать мемы, QR-коды и многое другое.\n\n"
-            "<b>📋 ОСНОВНЫЕ КОМАНДЫ (1/2)</b>\n"
+            f"<b>📋 Список всех команд ({page+1}/{total_pages})</b>\n"
             f"{chr(39)*30}\n"
-            "<b>🤖 AI:</b>\n"
-            "/ai — задать вопрос AI\n"
-            "/role — выбрать роль AI\n"
-            "/img — сгенерировать изображение\n"
-            "/tts — озвучить текст\n\n"
-            "<b>🎮 Игры:</b>\n"
-            "/roulette — русская рулетка\n"
-            "/mines — игра Mines\n"
-            "/spin — колесо фортуны\n\n"
-            "<b>💰 Экономика:</b>\n"
-            "/bank — Центробанк (кредиты/вклады)\n"
-            "/wallet — твой кошелек\n"
-            "/crypto — криптобиржа\n\n"
-            "Нажми ➡️ для продолжения 👇"
+            "Навигация: ⬅️ Назад | ➡️ Далее\n\n"
+            "Используй кнопки ниже для быстрого доступа к командам.\n"
+            "В самом низу ты найдешь ссылку на Условия использования."
         )
     else:
         return (
-            f"<b>📋 ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ (2/2)</b>\n"
+            f"<b>📋 Список всех команд ({page+1}/{total_pages})</b>\n"
             f"{chr(39)*30}\n"
-            "<b>🛠️ Инструменты:</b>\n"
-            "/qr — создать QR-код\n"
-            "/weather — погода\n"
-            "/translate — перевод\n"
-            "/meme — создать мем\n\n"
-            "<b>👑 Админ:</b>\n"
-            "/ban — забанить\n"
-            "/unban — разбанить\n"
-            "/mute — замутить\n"
-            "/promo — создать промокод\n\n"
-            "<b>📊 Статистика:</b>\n"
-            "/stats — твоя статистика\n"
-            "/top — топ пользователей\n"
-            "/about — о боте\n\n"
-            "Нажми ⬅️ чтобы вернуться 👇"
+            "Навигация: ⬅️ Назад | ➡️ Далее\n\n"
+            "Используй кнопки ниже для быстрого доступа к командам.\n"
+            "В самом низу ты найдешь ссылку на Условия использования."
         )
 
 
@@ -3761,20 +3760,17 @@ def callback_start_page(call: types.CallbackQuery):
         log_err("START_PAGE", str(e))
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("start_help:"))
-def callback_start_help(call: types.CallbackQuery):
-    """Обработчик кнопок помощи из меню /start."""
-    category = call.data.split(":")[1]
-    help_texts = {
-        "0": "🤖 <b>AI команды:</b>\n/ai — задать вопрос\n/role — выбрать роль\n/img — генерация картинок\n/tts — озвучка текста",
-        "1": "🎮 <b>Игры:</b>\n/roulette — русская рулетка\n/mines — mines\n/spin — колесо фортуны",
-        "2": "💰 <b>Экономика:</b>\n/bank — кредиты и вклады\n/wallet — кошелек\n/crypto — биржа",
-        "3": "🛠️ <b>Инструменты:</b>\n/qr — QR-коды\n/weather — погода\n/translate — перевод",
-        "4": "👑 <b>Админ:</b>\n/ban, /unban, /mute\n/promo — промокоды",
-        "5": "📊 <b>Статистика:</b>\n/stats — твоя статистика\n/top — рейтинг\n/about — о боте",
-    }
-    text = help_texts.get(category, "Неизвестная категория")
-    bot.answer_callback_query(call.id, text, show_alert=True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("start_cmd:"))
+def callback_start_cmd(call: types.CallbackQuery):
+    """Обработчик нажатия на кнопку команды в меню /start."""
+    cmd = call.data.split(":")[1]
+    bot.answer_callback_query(call.id, f"/{cmd}", show_alert=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "start_divider")
+def callback_start_divider(call: types.CallbackQuery):
+    """Обработчик нажатия на разделитель в меню /start."""
+    bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(commands=["start"])
