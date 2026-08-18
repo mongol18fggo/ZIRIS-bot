@@ -495,6 +495,19 @@ def create_tables():
 
     CREATE INDEX IF NOT EXISTS idx_chat_history_user_id ON chat_history(user_id);
 
+    -- Dialog history table (for /history command - saved conversations)
+    CREATE TABLE IF NOT EXISTS dialog_history (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        dialog_name TEXT NOT NULL,
+        dialog_data JSONB NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dialog_history_user_id ON dialog_history(user_id);
+    CREATE INDEX IF NOT EXISTS idx_dialog_history_created_at ON dialog_history(created_at DESC);
+
     -- Chat members table (for /ship and member tracking)
     CREATE TABLE IF NOT EXISTS chat_members (
         id SERIAL PRIMARY KEY,
@@ -823,6 +836,9 @@ def _reply_context_message(_bot_instance, message: types.Message):
 @bot.middleware_handler(update_types=["callback_query"])
 def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
     set_reply_context_from_call(call)
+
+# Maximum number of saved dialogs per user
+MAX_DIALOG_HISTORY = 20
 
 # Silero model
 silero_model = None
@@ -2835,6 +2851,98 @@ def clear_history(uid: str) -> None:
     """Clear user's in-memory AI chat history."""
     ai_chat_history.pop(str(uid), None)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dialog History Helpers (for /history command - saved conversations)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_dialog_to_db(uid: str, dialog_name: str, dialog_data: list) -> int:
+    """Save a dialog to the database. Returns the dialog ID."""
+    uid = str(uid)
+    import json
+    
+    # Delete oldest dialogs if we have MAX_DIALOG_HISTORY already
+    db_execute(
+        """
+        DELETE FROM dialog_history 
+        WHERE user_id = %s 
+        AND id NOT IN (
+            SELECT id FROM dialog_history 
+            WHERE user_id = %s 
+            ORDER BY created_at DESC 
+            LIMIT %s
+        )
+        """,
+        (uid, uid, MAX_DIALOG_HISTORY - 1)
+    )
+    
+    # Insert new dialog
+    result = db_execute(
+        """
+        INSERT INTO dialog_history (user_id, dialog_name, dialog_data, created_at, updated_at)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (uid, dialog_name, json.dumps(dialog_data, ensure_ascii=False)),
+        fetch=True,
+        fetch_one=True
+    )
+    return result[0] if result else None
+
+def get_user_dialogs(uid: str, limit: int = 20) -> list:
+    """Get user's saved dialogs from database."""
+    uid = str(uid)
+    results = db_execute(
+        """
+        SELECT id, dialog_name, dialog_data, created_at 
+        FROM dialog_history 
+        WHERE user_id = %s 
+        ORDER BY created_at DESC 
+        LIMIT %s
+        """,
+        (uid, limit),
+        fetch=True
+    )
+    return results if results else []
+
+def get_dialog_by_id(dialog_id: int) -> tuple:
+    """Get a specific dialog by ID."""
+    result = db_execute(
+        """
+        SELECT id, user_id, dialog_name, dialog_data, created_at 
+        FROM dialog_history 
+        WHERE id = %s
+        """,
+        (dialog_id,),
+        fetch=True,
+        fetch_one=True
+    )
+    return result if result else None
+
+def delete_dialog_from_db(dialog_id: int, uid: str) -> bool:
+    """Delete a dialog from database. Returns True if deleted."""
+    uid = str(uid)
+    result = db_execute(
+        """
+        DELETE FROM dialog_history 
+        WHERE id = %s AND user_id = %s
+        """,
+        (dialog_id, uid)
+    )
+    return result is not None
+
+def update_dialog_timestamp(dialog_id: int) -> None:
+    """Update the updated_at timestamp for a dialog."""
+    db_execute(
+        """
+        UPDATE dialog_history 
+        SET updated_at = CURRENT_TIMESTAMP 
+        WHERE id = %s
+        """,
+        (dialog_id,)
+    )
+
+
+
 def get_leaderboard() -> list:
     """Get top 10 users by cigarettes."""
     results = db_execute(
@@ -4499,8 +4607,293 @@ def cmd_clear(message: types.Message):
     username = message.from_user.username or message.from_user.first_name or "unknown"
     log_cmd(uid, username, "clear")
     increment_stat(uid, "commands")
+    
+    # Save current dialog to history before clearing
+    history = get_history(uid)
+    if history and len(history) > 0:
+        import json
+        # Generate dialog name from first user message
+        dialog_name = "Диалог от " + datetime.now().strftime("%d.%m.%Y %H:%M")
+        for msg in history:
+            if msg.get("role") == "user":
+                dialog_name = msg.get("content", "")[:50]
+                if len(msg.get("content", "")) > 50:
+                    dialog_name += "..."
+                break
+        
+        save_dialog_to_db(uid, dialog_name, history)
+    
     clear_history(uid)
-    bot.reply_to(message, "🧹 История диалога очищена! ИИ забыл всё, что ты ему писал.")
+    bot.reply_to(message, "🧹 История диалога очищена и сохранена! Используйте /history для просмотра.")
+
+
+@bot.message_handler(commands=["history"])
+def cmd_history(message: types.Message):
+    """Show user's saved dialog history (last 20 dialogs)."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, "history")
+    increment_stat(uid, "commands")
+    
+    dialogs = get_user_dialogs(uid, limit=MAX_DIALOG_HISTORY)
+    
+    if not dialogs:
+        bot.reply_to(message, "📭 У вас пока нет сохранённых диалогов.\n\nДиалоги сохраняются автоматически при использовании команды /clear или при завершении разговора с ИИ.")
+        return
+    
+    text = f"📚 Ваша история диалогов ({len(dialogs)} из {MAX_DIALOG_HISTORY}):\n\n"
+    
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    
+    for i, dlg in enumerate(dialogs):
+        dialog_id, dialog_name, dialog_data_json, created_at = dlg
+        import json
+        dialog_data = json.loads(dialog_data_json)
+        
+        # Get first message preview (max 50 chars)
+        first_message = ""
+        if dialog_data and len(dialog_data) > 0:
+            for msg in dialog_data:
+                if msg.get("role") == "user":
+                    first_message = msg.get("content", "")[:50]
+                    if len(msg.get("content", "")) > 50:
+                        first_message += "..."
+                    break
+        
+        display_name = dialog_name if dialog_name else "Без названия"
+        time_str = created_at.strftime("%d.%m.%Y %H:%M") if created_at else ""
+        
+        text += f"{i+1}. {display_name}\n   💬 {first_message if first_message else 'Нет сообщений'}\n   🕒 {time_str}\n\n"
+        
+        btn = types.InlineKeyboardButton(
+            text=f"📖 {display_name[:30]}",
+            callback_data=f"dlg_view:{dialog_id}"
+        )
+        keyboard.add(btn)
+    
+    # Add buttons for actions
+    del_btn = types.InlineKeyboardButton(text="🗑️ Удалить диалог", callback_data="dlg_delete_menu")
+    keyboard.add(del_btn)
+    
+    bot.reply_to(message, text, reply_markup=keyboard)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dlg_view:"))
+def callback_dialog_view(call: types.CallbackQuery):
+    """Show dialog details with option to continue."""
+    try:
+        dialog_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        bot.answer_callback_query(call.id, "❌ Ошибка: неверный ID диалога", show_alert=True)
+        return
+    
+    dialog = get_dialog_by_id(dialog_id)
+    
+    if not dialog:
+        bot.answer_callback_query(call.id, "❌ Диалог не найден", show_alert=True)
+        return
+    
+    d_id, user_id, dialog_name, dialog_data_json, created_at = dialog
+    import json
+    dialog_data = json.loads(dialog_data_json)
+    
+    # Check ownership
+    if str(user_id) != str(get_uid_from_call(call)):
+        bot.answer_callback_query(call.id, "❌ Это не ваш диалог", show_alert=True)
+        return
+    
+    # Build dialog preview
+    first_message = ""
+    messages_count = len(dialog_data) if dialog_data else 0
+    
+    if dialog_data and len(dialog_data) > 0:
+        for msg in dialog_data:
+            if msg.get("role") == "user":
+                first_message = msg.get("content", "")
+                break
+    
+    preview_text = f"📖 Диалог: {dialog_name if dialog_name else 'Без названия'}\n\n"
+    preview_text += f"💬 Первое сообщение:\n«{first_message[:200]}{'...' if len(first_message) > 200 else ''}»\n\n"
+    preview_text += f"📊 Всего сообщений: {messages_count}\n"
+    if created_at:
+        preview_text += f"🕒 Создан: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
+    
+    keyboard = types.InlineKeyboardMarkup()
+    continue_btn = types.InlineKeyboardButton(
+        text="➡️ Продолжить диалог",
+        callback_data=f"dlg_continue:{dialog_id}"
+    )
+    delete_btn = types.InlineKeyboardButton(
+        text="🗑️ Удалить этот диалог",
+        callback_data=f"dlg_delete:{dialog_id}"
+    )
+    back_btn = types.InlineKeyboardButton(
+        text="⬅️ Назад к списку",
+        callback_data="dlg_back"
+    )
+    keyboard.add(continue_btn)
+    keyboard.add(delete_btn)
+    keyboard.add(back_btn)
+    
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=preview_text,
+        reply_markup=keyboard
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "dlg_back")
+def callback_dialog_back(call: types.CallbackQuery):
+    """Go back to dialog list."""
+    # Just re-trigger the history command logic
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    # Create a fake message object for cmd_history
+    class FakeMessage:
+        def __init__(self, chat_id, from_user):
+            self.chat = type('Chat', (), {'id': chat_id})()
+            self.from_user = from_user
+            self.text = "/history"
+    
+    fake_msg = FakeMessage(
+        call.message.chat.id,
+        call.from_user
+    )
+    cmd_history(fake_msg)
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dlg_continue:"))
+def callback_dialog_continue(call: types.CallbackQuery):
+    """Continue a saved dialog - load it into memory and clear old context."""
+    try:
+        dialog_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        bot.answer_callback_query(call.id, "❌ Ошибка: неверный ID диалога", show_alert=True)
+        return
+    
+    dialog = get_dialog_by_id(dialog_id)
+    
+    if not dialog:
+        bot.answer_callback_query(call.id, "❌ Диалог не найден", show_alert=True)
+        return
+    
+    d_id, user_id, dialog_name, dialog_data_json, created_at = dialog
+    import json
+    dialog_data = json.loads(dialog_data_json)
+    
+    # Check ownership
+    uid = get_uid_from_call(call)
+    if str(user_id) != str(uid):
+        bot.answer_callback_query(call.id, "❌ Это не ваш диалог", show_alert=True)
+        return
+    
+    # Clear current in-memory history
+    clear_history(uid)
+    
+    # Load saved dialog into memory
+    for msg in dialog_data:
+        append_history(uid, msg["role"], msg["content"])
+    
+    # Update timestamp
+    update_dialog_timestamp(dialog_id)
+    
+    bot.answer_callback_query(call.id, f"✅ Диалог \"{dialog_name}\" загружен!", show_alert=False)
+    
+    # Send confirmation message
+    bot.send_message(
+        call.message.chat.id,
+        f"✅ Диалог «{dialog_name}» загружен!\n\nТеперь вы можете продолжить разговор с того места, где остановились."
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "dlg_delete_menu")
+def callback_dialog_delete_menu(call: types.CallbackQuery):
+    """Show menu to select dialog for deletion."""
+    uid = get_uid_from_call(call)
+    dialogs = get_user_dialogs(uid, limit=MAX_DIALOG_HISTORY)
+    
+    if not dialogs:
+        bot.answer_callback_query(call.id, "❌ Нет диалогов для удаления", show_alert=True)
+        return
+    
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    
+    for dlg in dialogs:
+        dialog_id, dialog_name, _, _ = dlg
+        btn = types.InlineKeyboardButton(
+            text=f"🗑️ {dialog_name if dialog_name else 'Без названия'}",
+            callback_data=f"dlg_delete:{dialog_id}"
+        )
+        keyboard.add(btn)
+    
+    back_btn = types.InlineKeyboardButton(text="⬅️ Назад", callback_data="dlg_back")
+    keyboard.add(back_btn)
+    
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="Выберите диалог для удаления:",
+        reply_markup=keyboard
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dlg_delete:"))
+def callback_dialog_delete(call: types.CallbackQuery):
+    """Delete a specific dialog."""
+    try:
+        dialog_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        bot.answer_callback_query(call.id, "❌ Ошибка: неверный ID диалога", show_alert=True)
+        return
+    
+    uid = get_uid_from_call(call)
+    
+    # Verify ownership before deleting
+    dialog = get_dialog_by_id(dialog_id)
+    if not dialog:
+        bot.answer_callback_query(call.id, "❌ Диалог не найден", show_alert=True)
+        return
+    
+    if str(dialog[1]) != str(uid):
+        bot.answer_callback_query(call.id, "❌ Это не ваш диалог", show_alert=True)
+        return
+    
+    # Delete the dialog
+    delete_dialog_from_db(dialog_id, uid)
+    
+    bot.answer_callback_query(call.id, "✅ Диалог удалён!", show_alert=False)
+    
+    # Show updated list
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="✅ Диалог успешно удалён!"
+    )
+    
+    # Re-show history after short delay
+    import time
+    time.sleep(0.5)
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    
+    class FakeMessage:
+        def __init__(self, chat_id, from_user):
+            self.chat = type('Chat', (), {'id': chat_id})()
+            self.from_user = from_user
+            self.text = "/history"
+    
+    fake_msg = FakeMessage(
+        call.message.chat.id,
+        call.from_user
+    )
+    cmd_history(fake_msg)
+
+
+def get_uid_from_call(call: types.CallbackQuery) -> str:
+    """Get user ID from callback query."""
+    return str(call.from_user.id)
 
 
 @bot.message_handler(commands=["reverse"])
