@@ -80,6 +80,7 @@ CRYPTO_CURRENCY_LABELS = {
 }
 CRYPTO_PENDING: dict[str, dict] = {}
 BANK_PENDING: dict[str, dict] = {}
+YTD_CACHE: dict[str, str] = {}  # video_id -> url cache for callback data
 _last_quote_sent: dict[int, float] = {}
 AI_HISTORY_LIMIT = 20
 
@@ -4670,9 +4671,12 @@ def cmd_ytd(message: types.Message):
             markup = types.InlineKeyboardMarkup()
             btn_audio = types.InlineKeyboardButton(
                 text="🎵 Скачать аудио",
-                callback_data=f"ytd_audio:{video_id}:{url}"
+                callback_data=f"ytda:{video_id}"
             )
             markup.row(btn_audio)
+            
+            # Cache the URL for this video_id
+            YTD_CACHE[video_id] = url
             
             bot.edit_message_text(
                 chat_id=status_msg.chat.id,
@@ -4725,19 +4729,24 @@ def cmd_ytd(message: types.Message):
         )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ytd_audio:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ytda:"))
 def cb_ytd_audio(call: types.CallbackQuery):
     """Handle audio download request from inline button."""
     uid = get_uid(call)
     username = call.from_user.username or call.from_user.first_name or "unknown"
     
     parts = call.data.split(":")
-    if len(parts) < 3:
+    if len(parts) != 2:
         bot.answer_callback_query(call.id, "❌ Неверный формат запроса", show_alert=True)
         return
     
     video_id = parts[1]
-    url = ":".join(parts[2:])  # Reconstruct URL in case it contains colons
+    
+    # Get URL from cache
+    url = YTD_CACHE.get(video_id)
+    if not url:
+        bot.answer_callback_query(call.id, "❌ Ссылка устарела. Отправьте /ytd заново", show_alert=True)
+        return
     
     log_cmd(uid, username, "ytd_audio", video_id)
     
@@ -4779,11 +4788,17 @@ def cb_ytd_audio(call: types.CallbackQuery):
                 # Cleanup
                 os.remove(mp3_path)
             else:
-                bot.answer_callback_query(call.id, "❌ Не удалось скачать аудио", show_alert=True)
+                bot.send_message(
+                    chat_id=call.message.chat.id,
+                    text=f"❌ Не удалось скачать аудио."
+                )
                 
     except Exception as e:
         log_err("YTD_AUDIO", str(e))
-        bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
+        bot.send_message(
+            chat_id=call.message.chat.id,
+            text=f"❌ Ошибка при скачивании аудио: {str(e)[:200]}"
+        )
 
 
 @bot.message_handler(commands=["history"])
