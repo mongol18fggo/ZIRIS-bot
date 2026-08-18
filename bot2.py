@@ -2902,11 +2902,25 @@ def get_dialog_messages(session_id: int) -> list:
 def delete_dialog_session(session_id: int, uid: str) -> bool:
     """Delete a dialog session (only if it belongs to the user)."""
     uid = str(uid)
-    result = db_execute(
-        "DELETE FROM dialog_sessions WHERE id = %s AND user_id = %s",
-        (session_id, uid)
-    )
-    return result is not None
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM dialog_sessions WHERE id = %s AND user_id = %s",
+                (session_id, uid)
+            )
+            deleted_count = cur.rowcount
+            conn.commit()
+            return deleted_count > 0
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        log_err("DB", f"Delete dialog error: {e}")
+        return False
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 def load_dialog_to_memory(session_id: int, uid: str) -> bool:
     """Load a dialog session into memory and clear current history."""
