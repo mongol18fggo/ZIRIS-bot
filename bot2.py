@@ -565,6 +565,28 @@ def create_tables():
         infect_count INTEGER DEFAULT 0,
         UNIQUE(owner_id, stat_date)
     );
+
+    -- Dialog history sessions table
+    CREATE TABLE IF NOT EXISTS dialog_sessions (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        session_name TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dialog_sessions_user_id ON dialog_sessions(user_id);
+
+    -- Dialog messages table
+    CREATE TABLE IF NOT EXISTS dialog_messages (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES dialog_sessions(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dialog_messages_session_id ON dialog_messages(session_id);
     """
     try:
         conn = get_db_connection()
@@ -2835,6 +2857,80 @@ def clear_history(uid: str) -> None:
     """Clear user's in-memory AI chat history."""
     ai_chat_history.pop(str(uid), None)
 
+def save_dialog_session(uid: str, session_name: str, messages: list) -> int:
+    """Save a dialog session to the database. Returns session_id."""
+    uid = str(uid)
+    # Create session
+    result = db_execute(
+        "INSERT INTO dialog_sessions (user_id, session_name) VALUES (%s, %s) RETURNING id",
+        (uid, session_name),
+        fetch=True,
+        fetch_one=True
+    )
+    if not result:
+        return -1
+    session_id = result[0]
+    
+    # Save messages
+    for msg in messages:
+        db_execute(
+            "INSERT INTO dialog_messages (session_id, role, content) VALUES (%s, %s, %s)",
+            (session_id, msg["role"], msg["content"])
+        )
+    
+    return session_id
+
+def get_user_dialogs(uid: str, limit: int = 20) -> list:
+    """Get user's last N dialog sessions."""
+    uid = str(uid)
+    results = db_execute(
+        "SELECT id, session_name, created_at FROM dialog_sessions WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+        (uid, limit),
+        fetch=True
+    )
+    return [(r[0], r[1], r[2]) for r in results] if results else []
+
+def get_dialog_messages(session_id: int) -> list:
+    """Get all messages from a dialog session."""
+    results = db_execute(
+        "SELECT role, content FROM dialog_messages WHERE session_id = %s ORDER BY created_at ASC",
+        (session_id,),
+        fetch=True
+    )
+    return [{"role": r[0], "content": r[1]} for r in results] if results else []
+
+def delete_dialog_session(session_id: int, uid: str) -> bool:
+    """Delete a dialog session (only if it belongs to the user)."""
+    uid = str(uid)
+    result = db_execute(
+        "DELETE FROM dialog_sessions WHERE id = %s AND user_id = %s",
+        (session_id, uid)
+    )
+    return result is not None
+
+def load_dialog_to_memory(session_id: int, uid: str) -> bool:
+    """Load a dialog session into memory and clear current history."""
+    uid = str(uid)
+    # Verify ownership
+    result = db_execute(
+        "SELECT id FROM dialog_sessions WHERE id = %s AND user_id = %s",
+        (session_id, uid),
+        fetch=True,
+        fetch_one=True
+    )
+    if not result:
+        return False
+    
+    # Clear current memory
+    clear_history(uid)
+    
+    # Load messages into memory
+    messages = get_dialog_messages(session_id)
+    for msg in messages:
+        append_history(uid, msg["role"], msg["content"])
+    
+    return True
+
 def get_leaderboard() -> list:
     """Get top 10 users by cigarettes."""
     results = db_execute(
@@ -4499,8 +4595,184 @@ def cmd_clear(message: types.Message):
     username = message.from_user.username or message.from_user.first_name or "unknown"
     log_cmd(uid, username, "clear")
     increment_stat(uid, "commands")
+    
+    # Auto-save current dialog before clearing
+    history = get_history(uid)
+    if history:
+        session_name = f"Диалог {datetime.now().strftime('%d.%m %H:%M')}"
+        save_dialog_session(uid, session_name, history)
+    
     clear_history(uid)
     bot.reply_to(message, "🧹 История диалога очищена! ИИ забыл всё, что ты ему писал.")
+
+
+@bot.message_handler(commands=["history"])
+def cmd_history(message: types.Message):
+    """Show last 20 dialog sessions with inline buttons."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, "history")
+    increment_stat(uid, "commands")
+    
+    dialogs = get_user_dialogs(uid, limit=20)
+    
+    if not dialogs:
+        bot.reply_to(message, "📭 У вас пока нет сохранённых диалогов.\n\nДиалоги сохраняются автоматически при использовании команды /clear или вручную через /save_dialog.")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    buttons = []
+    
+    for session_id, session_name, created_at in dialogs:
+        # Get first message preview (max 50 chars)
+        messages = get_dialog_messages(session_id)
+        first_msg = ""
+        if messages:
+            first_msg = messages[0]["content"][:50]
+            if len(messages[0]["content"]) > 50:
+                first_msg += "..."
+        
+        btn_text = f"💬 {session_name}\n   └─ {first_msg}" if first_msg else f"💬 {session_name}"
+        buttons.append(types.InlineKeyboardButton(text=btn_text, callback_data=f"dialog:{session_id}"))
+    
+    markup.add(*buttons)
+    
+    bot.reply_to(message, f"📚 Ваши последние диалоги ({len(dialogs)} из 20):\n\nНажмите на диалог для просмотра.", reply_markup=markup)
+
+
+@bot.message_handler(commands=["save_dialog"])
+def cmd_save_dialog(message: types.Message):
+    """Manually save current dialog to database."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, "save_dialog")
+    increment_stat(uid, "commands")
+    
+    history = get_history(uid)
+    
+    if not history:
+        bot.reply_to(message, "📭 Нет текущего диалога для сохранения.")
+        return
+    
+    # Extract custom name from command args if provided
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) > 1:
+        session_name = args[1][:100]  # Limit name length
+    else:
+        session_name = f"Диалог {datetime.now().strftime('%d.%m %H:%M')}"
+    
+    session_id = save_dialog_session(uid, session_name, history)
+    
+    if session_id > 0:
+        bot.reply_to(message, f"✅ Диалог \"{session_name}\" сохранён!\n\nВсего сообщений: {len(history)}\n\nИспользуйте /history для просмотра всех сохранённых диалогов.")
+    else:
+        bot.reply_to(message, "❌ Не удалось сохранить диалог.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dialog:"))
+def callback_dialog_view(call: types.CallbackQuery):
+    """Handle dialog selection - show preview with continue/delete buttons."""
+    uid = str(call.from_user.id)
+    session_id = int(call.data.split(":", 1)[1])
+    
+    # Verify ownership
+    result = db_execute(
+        "SELECT id, session_name FROM dialog_sessions WHERE id = %s AND user_id = %s",
+        (session_id, uid),
+        fetch=True,
+        fetch_one=True
+    )
+    
+    if not result:
+        bot.answer_callback_query(call.id, "❌ Этот диалог вам не принадлежит!", show_alert=True)
+        return
+    
+    session_name = result[1]
+    messages = get_dialog_messages(session_id)
+    
+    # Build preview text
+    preview_lines = [f"📖 <b>{session_name}</b>\n"]
+    char_count = len(preview_lines[0])
+    
+    for msg in messages[:5]:  # Show up to 5 messages
+        role_emoji = "👤" if msg["role"] == "user" else "🤖"
+        content_preview = msg["content"][:80]
+        if len(msg["content"]) > 80:
+            content_preview += "..."
+        line = f"{role_emoji} {content_preview}\n"
+        if char_count + len(line) > 3000:  # Telegram limit safety
+            preview_lines.append("...")
+            break
+        preview_lines.append(line)
+        char_count += len(line)
+    
+    if len(messages) > 5:
+        preview_lines.append(f"\n... и ещё {len(messages) - 5} сообщений")
+    
+    preview_text = "".join(preview_lines)
+    
+    # Create inline keyboard with continue and delete buttons
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_continue = types.InlineKeyboardButton("▶️ Продолжить диалог", callback_data=f"dialog_continue:{session_id}")
+    btn_delete = types.InlineKeyboardButton("🗑 Удалить", callback_data=f"dialog_delete:{session_id}")
+    markup.add(btn_continue, btn_delete)
+    
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=preview_text,
+        parse_mode="HTML",
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dialog_continue:"))
+def callback_dialog_continue(call: types.CallbackQuery):
+    """Load dialog into memory and clear current history."""
+    uid = str(call.from_user.id)
+    session_id = int(call.data.split(":", 1)[1])
+    
+    success = load_dialog_to_memory(session_id, uid)
+    
+    if success:
+        bot.answer_callback_query(call.id, "✅ Диалог загружен! Текущая история очищена.", show_alert=True)
+        
+        # Get session name for display
+        result = db_execute(
+            "SELECT session_name FROM dialog_sessions WHERE id = %s AND user_id = %s",
+            (session_id, uid),
+            fetch=True,
+            fetch_one=True
+        )
+        session_name = result[0] if result else "диалог"
+        
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"✅ <b>Диалог \"{session_name}\" загружен!</b>\n\nПамять очищена и контекст восстановлен. Можете продолжать общение."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Не удалось загрузить диалог.", show_alert=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dialog_delete:"))
+def callback_dialog_delete(call: types.CallbackQuery):
+    """Delete a dialog session."""
+    uid = str(call.from_user.id)
+    session_id = int(call.data.split(":", 1)[1])
+    
+    success = delete_dialog_session(session_id, uid)
+    
+    if success:
+        bot.answer_callback_query(call.id, "✅ Диалог удалён!", show_alert=True)
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="🗑 Диалог успешно удалён."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Не удалось удалить диалог.", show_alert=True)
 
 
 @bot.message_handler(commands=["reverse"])
