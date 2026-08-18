@@ -125,6 +125,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
+import yt_dlp
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Logging
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4618,6 +4620,170 @@ def cmd_clear(message: types.Message):
     
     clear_history(uid)
     bot.reply_to(message, "🧹 История диалога очищена! ИИ забыл всё, что ты ему писал.")
+
+
+@bot.message_handler(commands=["ytd"])
+def cmd_ytd(message: types.Message):
+    """Download video from YouTube using yt-dlp, with inline button to download audio."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2 or not args[1].startswith("http"):
+        bot.reply_to(message, "❌ Использование: /ytd {ссылка на YouTube}\n\nПример: /ytd https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        return
+    
+    url = args[1]
+    log_cmd(uid, username, "ytd", url[:50])
+    increment_stat(uid, "commands")
+    
+    status_msg = bot.reply_to(message, "⏳ Получаю информацию о видео...")
+    
+    try:
+        # First, get info without downloading
+        ydl_opts_info = {
+            'format': 'bestvideo+bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'simulate': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Unknown')
+            thumbnail = info.get('thumbnail', '')
+            video_id = info.get('id', '')
+            
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+            
+            caption = (
+                f"🎬 <b>{title}</b>\n\n"
+                f"👤 Автор: {uploader}\n"
+                f"⏱ Длительность: {duration_str}\n\n"
+                f"📥 Видео готово к загрузке!"
+            )
+            
+            # Update status message with video info and inline button for audio
+            markup = types.InlineKeyboardMarkup()
+            btn_audio = types.InlineKeyboardButton(
+                text="🎵 Скачать аудио",
+                callback_data=f"ytd_audio:{video_id}:{url}"
+            )
+            markup.row(btn_audio)
+            
+            bot.edit_message_text(
+                chat_id=status_msg.chat.id,
+                message_id=status_msg.message_id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=markup
+            )
+            
+            # Now download the video
+            ydl_opts_video = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': '/tmp/ytdv_%(id)s.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'merge_output_format': 'mp4',
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts_video) as ydl_video:
+                info_video = ydl_video.extract_info(url, download=True)
+                
+                # Find the downloaded video file
+                video_path = f"/tmp/ytdv_{video_id}.mp4"
+                
+                if os.path.exists(video_path):
+                    # Send video
+                    with open(video_path, 'rb') as video_file:
+                        bot.send_video(
+                            chat_id=message.chat.id,
+                            video=video_file,
+                            caption=f"🎬 <b>{title}</b>\n👤 {uploader}",
+                            parse_mode="HTML",
+                            reply_to_message_id=message.message_id
+                        )
+                    
+                    # Cleanup video
+                    os.remove(video_path)
+                else:
+                    bot.send_message(
+                        chat_id=message.chat.id,
+                        text=f"❌ Не удалось скачать видео.\n\nНазвание: {title}"
+                    )
+                
+    except Exception as e:
+        log_err("YTD", str(e))
+        bot.edit_message_text(
+            chat_id=status_msg.chat.id,
+            message_id=status_msg.message_id,
+            text=f"❌ Ошибка при скачивании: {str(e)[:200]}"
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ytd_audio:"))
+def cb_ytd_audio(call: types.CallbackQuery):
+    """Handle audio download request from inline button."""
+    uid = get_uid(call)
+    username = call.from_user.username or call.from_user.first_name or "unknown"
+    
+    parts = call.data.split(":")
+    if len(parts) < 3:
+        bot.answer_callback_query(call.id, "❌ Неверный формат запроса", show_alert=True)
+        return
+    
+    video_id = parts[1]
+    url = ":".join(parts[2:])  # Reconstruct URL in case it contains colons
+    
+    log_cmd(uid, username, "ytd_audio", video_id)
+    
+    # Acknowledge the callback
+    bot.answer_callback_query(call.id, "⏳ Скачиваю аудио...")
+    
+    try:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': '/tmp/ytda_%(id)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Unknown')
+            
+            mp3_path = f"/tmp/ytda_{video_id}.mp3"
+            
+            if os.path.exists(mp3_path):
+                bot.send_audio(
+                    chat_id=call.message.chat.id,
+                    audio=open(mp3_path, 'rb'),
+                    title=title,
+                    performer=uploader,
+                    duration=duration,
+                    reply_to_message_id=call.message.message_id
+                )
+                
+                # Cleanup
+                os.remove(mp3_path)
+            else:
+                bot.answer_callback_query(call.id, "❌ Не удалось скачать аудио", show_alert=True)
+                
+    except Exception as e:
+        log_err("YTD_AUDIO", str(e))
+        bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
 
 
 @bot.message_handler(commands=["history"])
