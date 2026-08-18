@@ -17,7 +17,7 @@ clans - Список всех кланов
 clear - Очистить историю сообщений
 cr - Crash игра
 create_clan - Создать клан
-ytd - Скачать видео из YouTube (/ytd {ссылка})
+ytd - Скачать видео из YouTube (с кнопкой для аудио)
 create_promo - Создать промокод
 create_role - Создать роль
 create_virus - Создать вирус
