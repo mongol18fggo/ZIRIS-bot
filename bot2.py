@@ -4640,6 +4640,7 @@ def cmd_ytd(message: types.Message):
     
     status_msg = bot.reply_to(message, "⏳ Получаю информацию о видео...")
     
+    video_path = None
     try:
         # First, get info without downloading
         ydl_opts_info = {
@@ -4647,15 +4648,19 @@ def cmd_ytd(message: types.Message):
             'quiet': True,
             'no_warnings': True,
             'simulate': True,
+            'socket_timeout': 30,
+            'extract_flat': False,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
             
+            if not info:
+                raise Exception("Не удалось получить информацию о видео")
+            
             title = info.get('title', 'Unknown')
             duration = info.get('duration', 0)
             uploader = info.get('uploader', 'Unknown')
-            thumbnail = info.get('thumbnail', '')
             video_id = info.get('id', '')
             
             duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
@@ -4693,6 +4698,8 @@ def cmd_ytd(message: types.Message):
                 'quiet': True,
                 'no_warnings': True,
                 'merge_output_format': 'mp4',
+                'socket_timeout': 60,
+                'retries': 3,
             }
             
             with yt_dlp.YoutubeDL(ydl_opts_video) as ydl_video:
@@ -4711,22 +4718,50 @@ def cmd_ytd(message: types.Message):
                             parse_mode="HTML",
                             reply_to_message_id=message.message_id
                         )
-                    
-                    # Cleanup video
-                    os.remove(video_path)
                 else:
                     bot.send_message(
                         chat_id=message.chat.id,
                         text=f"❌ Не удалось скачать видео.\n\nНазвание: {title}"
                     )
                 
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        log_err("YTD", error_msg)
+        if "not available" in error_msg.lower():
+            error_text = "❌ Это видео недоступно для скачивания.\n\nВозможные причины:\n• Видео удалено автором\n• Видео заблокировано в вашем регионе\n• Видео приватное"
+        elif "private" in error_msg.lower():
+            error_text = "❌ Это приватное видео. Я могу скачать только публичные видео."
+        else:
+            error_text = f"❌ Ошибка при скачивании: {error_msg[:200]}"
+        
+        try:
+            bot.edit_message_text(
+                chat_id=status_msg.chat.id,
+                message_id=status_msg.message_id,
+                text=error_text
+            )
+        except:
+            bot.send_message(chat_id=message.chat.id, text=error_text)
     except Exception as e:
-        log_err("YTD", str(e))
-        bot.edit_message_text(
-            chat_id=status_msg.chat.id,
-            message_id=status_msg.message_id,
-            text=f"❌ Ошибка при скачивании: {str(e)[:200]}"
-        )
+        error_msg = str(e)
+        log_err("YTD", error_msg)
+        error_text = f"❌ Ошибка при скачивании: {error_msg[:200]}"
+        
+        try:
+            bot.edit_message_text(
+                chat_id=status_msg.chat.id,
+                message_id=status_msg.message_id,
+                text=error_text
+            )
+        except:
+            bot.send_message(chat_id=message.chat.id, text=error_text)
+    finally:
+        # Cleanup video file if it exists
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except:
+                pass
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ytda:"))
@@ -4753,12 +4788,15 @@ def cb_ytd_audio(call: types.CallbackQuery):
     # Acknowledge the callback
     bot.answer_callback_query(call.id, "⏳ Скачиваю аудио...")
     
+    mp3_path = None
     try:
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': '/tmp/ytda_%(id)s.%(ext)s',
             'quiet': True,
             'no_warnings': True,
+            'socket_timeout': 60,
+            'retries': 3,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -4784,21 +4822,34 @@ def cb_ytd_audio(call: types.CallbackQuery):
                     duration=duration,
                     reply_to_message_id=call.message.message_id
                 )
-                
-                # Cleanup
-                os.remove(mp3_path)
             else:
                 bot.send_message(
                     chat_id=call.message.chat.id,
                     text=f"❌ Не удалось скачать аудио."
                 )
                 
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        log_err("YTD_AUDIO", error_msg)
+        if "not available" in error_msg.lower():
+            error_text = "❌ Это видео недоступно для скачивания аудио."
+        else:
+            error_text = f"❌ Ошибка при скачивании аудио: {error_msg[:200]}"
+        bot.send_message(chat_id=call.message.chat.id, text=error_text)
     except Exception as e:
-        log_err("YTD_AUDIO", str(e))
+        error_msg = str(e)
+        log_err("YTD_AUDIO", error_msg)
         bot.send_message(
             chat_id=call.message.chat.id,
-            text=f"❌ Ошибка при скачивании аудио: {str(e)[:200]}"
+            text=f"❌ Ошибка при скачивании аудио: {error_msg[:200]}"
         )
+    finally:
+        # Cleanup audio file if it exists
+        if mp3_path and os.path.exists(mp3_path):
+            try:
+                os.remove(mp3_path)
+            except:
+                pass
 
 
 @bot.message_handler(commands=["history"])
