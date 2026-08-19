@@ -314,6 +314,24 @@ def create_tables():
     ALTER TABLE users ADD COLUMN IF NOT EXISTS awards JSONB DEFAULT '[]';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMP DEFAULT NULL;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS crypto_balance REAL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
+
+    -- Items table for user inventory
+    CREATE TABLE IF NOT EXISTS user_items (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        item_name TEXT NOT NULL,
+        item_description TEXT,
+        category TEXT NOT NULL,
+        price INTEGER DEFAULT 0,
+        currency TEXT DEFAULT 'rubles',
+        given_by_creator BOOLEAN DEFAULT false,
+        obtained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_user_items_user_id ON user_items(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_items_category ON user_items(category);
 
     -- Clans table
     CREATE TABLE IF NOT EXISTS clans (
@@ -465,6 +483,7 @@ def create_tables():
         text TEXT NOT NULL,
         author TEXT NOT NULL,
         photo_file_id TEXT DEFAULT NULL,
+        animation_file_id TEXT DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -472,6 +491,7 @@ def create_tables():
 
     -- Add photo_file_id column to existing quotes tables safely
     ALTER TABLE quotes ADD COLUMN IF NOT EXISTS photo_file_id TEXT DEFAULT NULL;
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS animation_file_id TEXT DEFAULT NULL;
 
     -- Reminders table
     CREATE TABLE IF NOT EXISTS reminders (
@@ -2829,6 +2849,21 @@ def activate_promo_code(code: str, uid: str) -> Optional[str]:
         add_cigarettes(uid, reward_amount)
     elif reward_type == "real_cigarettes":
         add_real_cigarettes(uid, reward_amount)
+    elif reward_type == "item":
+        # Give item from promo - reward_amount contains JSON string with item data
+        import json as json_mod
+        try:
+            item_data = json_mod.loads(reward_amount) if isinstance(reward_amount, str) else reward_amount
+            item_id = item_data.get("item_id", f"promo_{promo['id']}")
+            item_name = item_data.get("name", "Промо предмет")
+            item_desc = item_data.get("description", "")
+            category = item_data.get("category", "promo")
+            price = item_data.get("price", 0)
+            currency = item_data.get("currency", "rubles")
+            give_item_to_user(uid, item_id, item_name, item_desc, category, price, currency, by_creator=False)
+        except Exception as e:
+            log_err("PROMO", f"Error giving item from promo: {e}")
+            return None
     else:
         return None
 
@@ -3000,34 +3035,34 @@ def get_all_chats() -> list[int]:
     results = db_execute("SELECT id FROM chats", fetch=True)
     return [r[0] for r in results] if results else []
 
-def add_quote(chat_id: int, text: str, author: str, photo_file_id: str = None) -> int:
+def add_quote(chat_id: int, text: str, author: str, photo_file_id: str = None, animation_file_id: str = None) -> int:
     results = db_execute("SELECT COUNT(*) FROM quotes WHERE chat_id = %s", (chat_id,), fetch=True)
     count = results[0][0] if results else 0
 
     db_execute(
-        "INSERT INTO quotes (chat_id, text, author, photo_file_id) VALUES (%s, %s, %s, %s)",
-        (chat_id, text, author, photo_file_id)
+        "INSERT INTO quotes (chat_id, text, author, photo_file_id, animation_file_id) VALUES (%s, %s, %s, %s, %s)",
+        (chat_id, text, author, photo_file_id, animation_file_id)
     )
     return count + 1
 
 def get_random_quote(chat_id: int) -> Optional[dict]:
     results = db_execute(
-        "SELECT text, author, photo_file_id FROM quotes WHERE chat_id = %s ORDER BY RANDOM() LIMIT 1",
+        "SELECT text, author, photo_file_id, animation_file_id FROM quotes WHERE chat_id = %s ORDER BY RANDOM() LIMIT 1",
         (chat_id,),
         fetch=True
     )
     if results:
-        return {"text": results[0][0], "author": results[0][1], "photo_file_id": results[0][2]}
+        return {"text": results[0][0], "author": results[0][1], "photo_file_id": results[0][2], "animation_file_id": results[0][3]}
     return None
 
 def get_quotes_list(chat_id: int, limit: int = 20) -> list:
     results = db_execute(
-        "SELECT id, text, author FROM quotes WHERE chat_id = %s ORDER BY id DESC LIMIT %s",
+        "SELECT id, text, author, photo_file_id, animation_file_id FROM quotes WHERE chat_id = %s ORDER BY id DESC LIMIT %s",
         (chat_id, limit),
         fetch=True
     )
     if results:
-        return [{"id": r[0], "text": r[1], "author": r[2]} for r in results]
+        return [{"id": r[0], "text": r[1], "author": r[2], "photo_file_id": r[3], "animation_file_id": r[4]} for r in results]
     return []
 
 def delete_quote_by_id(quote_id: int, chat_id: int) -> bool:
@@ -3464,6 +3499,7 @@ COMMAND_LIST = [
     "/wallet - кошелёк COK (график, перевод)",
     "/bank - Центробанк (кредит, вклад, комиссии)",
     "/quote - сохранить цитату",
+    "/citatnik - просмотр всех цитат чата (админы могут удалять)",
     "/ship - шипперим двух рандомных людей из чата",
     "/shhh - нашептать секретное сообщение",
     "/mines - игра Мины (ставка на окурки/рубли/сигареты)",
@@ -3700,7 +3736,11 @@ def maybe_send_random_quote(message: types.Message) -> bool:
     if not quote:
         return False
     try:
-        if quote.get('photo_file_id'):
+        if quote.get('animation_file_id'):
+            caption = f"💬 <i>{quote['text']}</i>\n\n— {quote['author']}" if quote['text'] and quote['text'] != "🎬" else f"💬 — {quote['author']}"
+            bot.send_animation(chat_id, quote['animation_file_id'], caption=caption,
+                               reply_to_message_id=message.message_id)
+        elif quote.get('photo_file_id'):
             caption = f"💬 <i>{quote['text']}</i>\n\n— {quote['author']}" if quote['text'] and quote['text'] != "📷" else f"💬 — {quote['author']}"
             bot.send_photo(chat_id, quote['photo_file_id'], caption=caption,
                            reply_to_message_id=message.message_id)
@@ -5936,21 +5976,160 @@ def cmd_quote(message: types.Message):
     replied = message.reply_to_message
     text = replied.text or replied.caption
     photo_file_id = None
+    animation_file_id = None
+    
     if replied.photo:
         photo_file_id = replied.photo[-1].file_id
+    elif replied.animation:
+        animation_file_id = replied.animation.file_id
+    
     if not text or not text.strip():
-        if not photo_file_id:
-            bot.reply_to(message, "Можно сохранять только текстовые сообщения или фото с подписью.")
+        if not photo_file_id and not animation_file_id:
+            bot.reply_to(message, "Можно сохранять только текстовые сообщения, фото с подписью или GIF с подписью.")
             return
-        text = "📷"
+        if animation_file_id:
+            text = "🎬"
+        else:
+            text = "📷"
 
     author_name = replied.from_user.first_name or ""
     if replied.from_user.username:
         author_name = f"@{replied.from_user.username}"
 
-    total = add_quote(message.chat.id, text.strip(), author_name, photo_file_id)
+    total = add_quote(message.chat.id, text.strip(), author_name, photo_file_id, animation_file_id)
     log_cmd(uid, username, "quote", f"saved from {author_name} | total={total}")
     bot.reply_to(message, f"💬 Цитата сохранена! Всего цитат в чате: <b>{total}</b>")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Citatnik Command - View all quotes in current chat
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["citatnik"])
+def cmd_citatnik(message: types.Message):
+    """Show last 20 quotes from current chat with inline buttons."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, "citatnik")
+    increment_stat(uid, "commands")
+    
+    chat_id = message.chat.id
+    quotes = get_quotes_list(chat_id, limit=20)
+    
+    if not quotes:
+        bot.reply_to(message, "📭 В этом чате пока нет сохранённых цитат.\n\nИспользуйте /quote (ответив на сообщение) чтобы сохранить цитату.")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    buttons = []
+    
+    for q in quotes:
+        # Build preview text
+        text_preview = q["text"][:50]
+        if len(q["text"]) > 50:
+            text_preview += "..."
+        
+        icon = "🎬" if q.get("animation_file_id") else ("📷" if q.get("photo_file_id") else "💬")
+        btn_text = f"{icon} #{q['id']} — {q['author']}: {text_preview}"
+        buttons.append(types.InlineKeyboardButton(text=btn_text, callback_data=f"quote:{q['id']}"))
+    
+    markup.add(*buttons)
+    
+    bot.reply_to(message, f"📚 Цитатник чата ({len(quotes)} из последних 20):\n\nНажмите на цитату для просмотра.", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("quote:"))
+def callback_quote_view(call: types.CallbackQuery):
+    """Handle quote selection - show full quote with delete button for admins."""
+    uid = str(call.from_user.id)
+    quote_id = int(call.data.split(":", 1)[1])
+    chat_id = call.message.chat.id
+    
+    # Get quote details
+    result = db_execute(
+        "SELECT id, text, author, photo_file_id, animation_file_id FROM quotes WHERE id = %s AND chat_id = %s",
+        (quote_id, chat_id),
+        fetch=True,
+        fetch_one=True
+    )
+    
+    if not result:
+        bot.answer_callback_query(call.id, "❌ Цитата не найдена!", show_alert=True)
+        return
+    
+    q_id, q_text, q_author, q_photo, q_animation = result
+    
+    # Build display text
+    icon = "🎬" if q_animation else ("📷" if q_photo else "💬")
+    display_text = f"{icon} <b>Цитата #{q_id}</b>\n\n"
+    
+    if q_text and q_text not in ("📷", "🎬"):
+        display_text += f"<i>{q_text}</i>\n\n"
+    
+    display_text += f"— {q_author}"
+    
+    # Check if user is admin/creator of the chat
+    is_admin_user = False
+    try:
+        member = bot.get_chat_member(chat_id, call.from_user.id)
+        is_admin_user = member.status in ("administrator", "creator")
+    except Exception:
+        pass
+    
+    # Create inline keyboard with delete button for admins
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if is_admin_user:
+        btn_delete = types.InlineKeyboardButton("🗑 Удалить", callback_data=f"quote_delete:{q_id}")
+        markup.add(btn_delete)
+    
+    # Send/edit message with quote content
+    try:
+        if q_animation:
+            bot.send_animation(chat_id, q_animation, caption=display_text, parse_mode="HTML", reply_markup=markup)
+        elif q_photo:
+            bot.send_photo(chat_id, q_photo, caption=display_text, parse_mode="HTML", reply_markup=markup)
+        else:
+            if markup:
+                bot.send_message(chat_id, display_text, parse_mode="HTML", reply_markup=markup)
+            else:
+                bot.send_message(chat_id, display_text, parse_mode="HTML")
+        
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        log_err("CITATNIK", f"Failed to send quote: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка при отображении цитаты", show_alert=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("quote_delete:"))
+def callback_quote_delete(call: types.CallbackQuery):
+    """Delete a quote (admin only)."""
+    uid = str(call.from_user.id)
+    quote_id = int(call.data.split(":", 1)[1])
+    chat_id = call.message.chat.id
+    
+    # Verify admin status
+    is_admin_user = False
+    try:
+        member = bot.get_chat_member(chat_id, call.from_user.id)
+        is_admin_user = member.status in ("administrator", "creator")
+    except Exception:
+        pass
+    
+    if not is_admin_user:
+        bot.answer_callback_query(call.id, "❌ Только администраторы могут удалять цитаты!", show_alert=True)
+        return
+    
+    success = delete_quote_by_id(quote_id, chat_id)
+    
+    if success:
+        bot.answer_callback_query(call.id, "✅ Цитата удалена!", show_alert=True)
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text="🗑 Цитата успешно удалена."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Не удалось удалить цитату.", show_alert=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
