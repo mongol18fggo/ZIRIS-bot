@@ -1,1 +1,352 @@
-
+[
+  {
+    "id": "food_1",
+    "name": "Бутерброд",
+    "description": "Удовольствие в каждом кусочке. Бутерброд - отличный выбор!",
+    "price": 229,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_2",
+    "name": "Пицца",
+    "description": "Праздничный стол. Пицца - отличный выбор!",
+    "price": 31,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_3",
+    "name": "Бургер",
+    "description": "Для гурманов. Бургер - отличный выбор!",
+    "price": 378,
+    "currency": "butts"
+  },
+  {
+    "id": "food_4",
+    "name": "Хот-дог",
+    "description": "Кулинарный шедевр. Хот-дог - отличный выбор!",
+    "price": 376,
+    "currency": "butts"
+  },
+  {
+    "id": "food_5",
+    "name": "Шаурма",
+    "description": "Быстрый перекус. Шаурма - отличный выбор!",
+    "price": 37,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_6",
+    "name": "Суши",
+    "description": "Гастрономическое удовольствие. Суши - отличный выбор!",
+    "price": 379,
+    "currency": "butts"
+  },
+  {
+    "id": "food_7",
+    "name": "Роллы",
+    "description": "Удовольствие в каждом кусочке. Роллы - отличный выбор!",
+    "price": 165,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_8",
+    "name": "Паста",
+    "description": "Незабываемый вкус. Паста - отличный выбор!",
+    "price": 180,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_9",
+    "name": "Суп",
+    "description": "Свежие ингредиенты. Суп - отличный выбор!",
+    "price": 167,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_10",
+    "name": "Борщ",
+    "description": "Секретный ингредиент. Борщ - отличный выбор!",
+    "price": 15,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_11",
+    "name": "Пельмени",
+    "description": "Праздничный стол. Пельмени - отличный выбор!",
+    "price": 118,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_12",
+    "name": "Вареники",
+    "description": "Праздничный стол. Вареники - отличный выбор!",
+    "price": 58,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_13",
+    "name": "Блины",
+    "description": "Удовольствие в каждом кусочке. Блины - отличный выбор!",
+    "price": 219,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_14",
+    "name": "Оладьи",
+    "description": "Авторский рецепт. Оладьи - отличный выбор!",
+    "price": 445,
+    "currency": "butts"
+  },
+  {
+    "id": "food_15",
+    "name": "Сырники",
+    "description": "Свежие ингредиенты. Сырники - отличный выбор!",
+    "price": 48,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_16",
+    "name": "Каша",
+    "description": "Изысканный вкус. Каша - отличный выбор!",
+    "price": 267,
+    "currency": "butts"
+  },
+  {
+    "id": "food_17",
+    "name": "Рис",
+    "description": "Здоровое питание. Рис - отличный выбор!",
+    "price": 30,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_18",
+    "name": "Гречка",
+    "description": "Традиционный вкус. Гречка - отличный выбор!",
+    "price": 13,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_19",
+    "name": "Макароны",
+    "description": "Натуральный продукт. Макароны - отличный выбор!",
+    "price": 207,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_20",
+    "name": "Картофель",
+    "description": "Гастрономическое удовольствие. Картофель - отличный выбор!",
+    "price": 161,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_21",
+    "name": "Курица",
+    "description": "Кулинарный шедевр. Курица - отличный выбор!",
+    "price": 35,
+    "currency": "butts"
+  },
+  {
+    "id": "food_22",
+    "name": "Мясо",
+    "description": "Натуральный продукт. Мясо - отличный выбор!",
+    "price": 149,
+    "currency": "butts"
+  },
+  {
+    "id": "food_23",
+    "name": "Рыба",
+    "description": "Незабываемый вкус. Рыба - отличный выбор!",
+    "price": 96,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_24",
+    "name": "Колбаса",
+    "description": "Быстрый перекус. Колбаса - отличный выбор!",
+    "price": 495,
+    "currency": "butts"
+  },
+  {
+    "id": "food_25",
+    "name": "Сыр",
+    "description": "Здоровое питание. Сыр - отличный выбор!",
+    "price": 144,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_26",
+    "name": "Хлеб",
+    "description": "Быстрый перекус. Хлеб - отличный выбор!",
+    "price": 224,
+    "currency": "butts"
+  },
+  {
+    "id": "food_27",
+    "name": "Булка",
+    "description": "Гастрономическое удовольствие. Булка - отличный выбор!",
+    "price": 186,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_28",
+    "name": "Круассан",
+    "description": "Незабываемый вкус. Круассан - отличный выбор!",
+    "price": 298,
+    "currency": "butts"
+  },
+  {
+    "id": "food_29",
+    "name": "Пирожок",
+    "description": "Традиционный вкус. Пирожок - отличный выбор!",
+    "price": 17,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_30",
+    "name": "Пирог",
+    "description": "Праздничный стол. Пирог - отличный выбор!",
+    "price": 408,
+    "currency": "butts"
+  },
+  {
+    "id": "food_31",
+    "name": "Торт",
+    "description": "Здоровое питание. Торт - отличный выбор!",
+    "price": 111,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_32",
+    "name": "Пирожное",
+    "description": "Кулинарный шедевр. Пирожное - отличный выбор!",
+    "price": 121,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_33",
+    "name": "Мороженое",
+    "description": "Вкусно и полезно. Мороженое - отличный выбор!",
+    "price": 164,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_34",
+    "name": "Шоколад",
+    "description": "Для всей семьи. Шоколад - отличный выбор!",
+    "price": 6,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_35",
+    "name": "Конфеты",
+    "description": "Для гурманов. Конфеты - отличный выбор!",
+    "price": 194,
+    "currency": "butts"
+  },
+  {
+    "id": "food_36",
+    "name": "Печенье",
+    "description": "Секретный ингредиент. Печенье - отличный выбор!",
+    "price": 52,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_37",
+    "name": "Вафли",
+    "description": "Энергия на весь день. Вафли - отличный выбор!",
+    "price": 81,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_38",
+    "name": "Зефир",
+    "description": "Пища богов. Зефир - отличный выбор!",
+    "price": 161,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_39",
+    "name": "Пастила",
+    "description": "Для гурманов. Пастила - отличный выбор!",
+    "price": 112,
+    "currency": "butts"
+  },
+  {
+    "id": "food_40",
+    "name": "Мармелад",
+    "description": "Для всей семьи. Мармелад - отличный выбор!",
+    "price": 235,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_41",
+    "name": "Фрукты",
+    "description": "Свежие ингредиенты. Фрукты - отличный выбор!",
+    "price": 54,
+    "currency": "butts"
+  },
+  {
+    "id": "food_42",
+    "name": "Яблоки",
+    "description": "Изысканный вкус. Яблоки - отличный выбор!",
+    "price": 8,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_43",
+    "name": "Бананы",
+    "description": "Домашняя кухня. Бананы - отличный выбор!",
+    "price": 221,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_44",
+    "name": "Апельсины",
+    "description": "Авторский рецепт. Апельсины - отличный выбор!",
+    "price": 140,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_45",
+    "name": "Виноград",
+    "description": "Традиционный вкус. Виноград - отличный выбор!",
+    "price": 232,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_46",
+    "name": "Овощи",
+    "description": "Эксклюзивный рецепт. Овощи - отличный выбор!",
+    "price": 223,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_47",
+    "name": "Помидоры",
+    "description": "Кулинарный шедевр. Помидоры - отличный выбор!",
+    "price": 183,
+    "currency": "butts"
+  },
+  {
+    "id": "food_48",
+    "name": "Огурцы",
+    "description": "Для всей семьи. Огурцы - отличный выбор!",
+    "price": 214,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_49",
+    "name": "Салат",
+    "description": "Свежие ингредиенты. Салат - отличный выбор!",
+    "price": 33,
+    "currency": "rubles"
+  },
+  {
+    "id": "food_50",
+    "name": "Закуска",
+    "description": "Секретный ингредиент. Закуска - отличный выбор!",
+    "price": 53,
+    "currency": "rubles"
+  }
+]

@@ -1,1 +1,8 @@
-
+{
+  "retro": {"name": "Ретро", "emoji": "📻"},
+  "furniture": {"name": "Мебель", "emoji": "🪑"},
+  "trinkets": {"name": "Безделушки", "emoji": "🔮"},
+  "gifts": {"name": "Подарки", "emoji": "🎁"},
+  "toys": {"name": "Игрушки", "emoji": "🧸"},
+  "food": {"name": "Еда", "emoji": "🍔"}
+}

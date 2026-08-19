@@ -1,1 +1,359 @@
-
+[
+  {
+    "id": "furniture_1",
+    "name": "Деревянный стул",
+    "description": "Дизайнерское решение. Деревянный стул - отличный выбор!",
+    "price": 93,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_2",
+    "name": "Мягкое кресло",
+    "description": "Практично и стильно. Мягкое кресло - отличный выбор!",
+    "price": 145,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_3",
+    "name": "Обеденный стол",
+    "description": "Максимальный комфорт. Обеденный стол - отличный выбор!",
+    "price": 159,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_4",
+    "name": "Книжный шкаф",
+    "description": "Максимальный комфорт. Книжный шкаф - отличный выбор!",
+    "price": 315,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_5",
+    "name": "Прикроватная тумба",
+    "description": "Рабочее место мечты. Прикроватная тумба - отличный выбор!",
+    "price": 9,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_6",
+    "name": "Комод",
+    "description": "Кухонная необходимость. Комод - отличный выбор!",
+    "price": 205,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_7",
+    "name": "Шкаф-купе",
+    "description": "Элегантный внешний вид. Шкаф-купе - отличный выбор!",
+    "price": 288,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_8",
+    "name": "Диван",
+    "description": "Элегантный внешний вид. Диван - отличный выбор!",
+    "price": 225,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_9",
+    "name": "Журнальный столик",
+    "description": "Максимальный комфорт. Журнальный столик - отличный выбор!",
+    "price": 168,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_10",
+    "name": "Письменный стол",
+    "description": "Идеально для спальни. Письменный стол - отличный выбор!",
+    "price": 146,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_11",
+    "name": "Кровать",
+    "description": "Хранение со вкусом. Кровать - отличный выбор!",
+    "price": 126,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_12",
+    "name": "Матрас",
+    "description": "Идеально для спальни. Матрас - отличный выбор!",
+    "price": 41,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_13",
+    "name": "Подушка",
+    "description": "Эргономичный дизайн. Подушка - отличный выбор!",
+    "price": 95,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_14",
+    "name": "Одеяло",
+    "description": "Дизайнерское решение. Одеяло - отличный выбор!",
+    "price": 174,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_15",
+    "name": "Пуфик",
+    "description": "Стиль и практичность. Пуфик - отличный выбор!",
+    "price": 177,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_16",
+    "name": "Банкетка",
+    "description": "Стиль и практичность. Банкетка - отличный выбор!",
+    "price": 487,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_17",
+    "name": "Консоль",
+    "description": "Качественные материалы. Консоль - отличный выбор!",
+    "price": 4,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_18",
+    "name": "Стеллаж",
+    "description": "Стиль и практичность. Стеллаж - отличный выбор!",
+    "price": 78,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_19",
+    "name": "Тумба под ТВ",
+    "description": "Создает атмосферу уюта. Тумба под ТВ - отличный выбор!",
+    "price": 215,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_20",
+    "name": "Вешалка",
+    "description": "Дизайнерское решение. Вешалка - отличный выбор!",
+    "price": 146,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_21",
+    "name": "Зеркало в раме",
+    "description": "Долговечность и надежность. Зеркало в раме - отличный выбор!",
+    "price": 467,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_22",
+    "name": "Настенная полка",
+    "description": "Долговечность и надежность. Настенная полка - отличный выбор!",
+    "price": 134,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_23",
+    "name": "Угловой диван",
+    "description": "Идеально для спальни. Угловой диван - отличный выбор!",
+    "price": 169,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_24",
+    "name": "Раскладной стол",
+    "description": "Максимальный комфорт. Раскладной стол - отличный выбор!",
+    "price": 33,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_25",
+    "name": "Барный стул",
+    "description": "Эргономичный дизайн. Барный стул - отличный выбор!",
+    "price": 98,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_26",
+    "name": "Табурет",
+    "description": "Для большого дома. Табурет - отличный выбор!",
+    "price": 220,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_27",
+    "name": "Скамейка",
+    "description": "Для вашей гостиной. Скамейка - отличный выбор!",
+    "price": 41,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_28",
+    "name": "Кушетка",
+    "description": "Рабочее место мечты. Кушетка - отличный выбор!",
+    "price": 179,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_29",
+    "name": "Рекамье",
+    "description": "Функциональное решение. Рекамье - отличный выбор!",
+    "price": 133,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_30",
+    "name": "Лежанка",
+    "description": "Максимальный комфорт. Лежанка - отличный выбор!",
+    "price": 147,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_31",
+    "name": "Кресло-качалка",
+    "description": "Рабочее место мечты. Кресло-качалка - отличный выбор!",
+    "price": 49,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_32",
+    "name": "Офисное кресло",
+    "description": "Премиум качество. Офисное кресло - отличный выбор!",
+    "price": 60,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_33",
+    "name": "Стул для кормления",
+    "description": "Для большого дома. Стул для кормления - отличный выбор!",
+    "price": 190,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_34",
+    "name": "Детская кровать",
+    "description": "Рабочее место мечты. Детская кровать - отличный выбор!",
+    "price": 478,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_35",
+    "name": "Двухъярусная кровать",
+    "description": "Рабочее место мечты. Двухъярусная кровать - отличный выбор!",
+    "price": 461,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_36",
+    "name": "Чердак-кровать",
+    "description": "Премиум качество. Чердак-кровать - отличный выбор!",
+    "price": 313,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_37",
+    "name": "Модульный диван",
+    "description": "Эргономичный дизайн. Модульный диван - отличный выбор!",
+    "price": 21,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_38",
+    "name": "Секция стенки",
+    "description": "Хранение со вкусом. Секция стенки - отличный выбор!",
+    "price": 59,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_39",
+    "name": "Горка для посуды",
+    "description": "Премиум качество. Горка для посуды - отличный выбор!",
+    "price": 286,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_40",
+    "name": "Сервант",
+    "description": "Для большого дома. Сервант - отличный выбор!",
+    "price": 182,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_41",
+    "name": "Буфет",
+    "description": "Эргономичный дизайн. Буфет - отличный выбор!",
+    "price": 214,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_42",
+    "name": "Кухонный гарнитур",
+    "description": "Кухонная необходимость. Кухонный гарнитур - отличный выбор!",
+    "price": 248,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_43",
+    "name": "Раковина",
+    "description": "Для большого дома. Раковина - отличный выбор!",
+    "price": 44,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_44",
+    "name": "Столешница",
+    "description": "Максимальный комфорт. Столешница - отличный выбор!",
+    "price": 147,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_45",
+    "name": "Фартук кухонный",
+    "description": "Качественные материалы. Фартук кухонный - отличный выбор!",
+    "price": 33,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_46",
+    "name": "Напольная вешалка",
+    "description": "Качественные материалы. Напольная вешалка - отличный выбор!",
+    "price": 101,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_47",
+    "name": "Обувница",
+    "description": "Для вашей гостиной. Обувница - отличный выбор!",
+    "price": 110,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_48",
+    "name": "Антресоль",
+    "description": "Элегантный внешний вид. Антресоль - отличный выбор!",
+    "price": 418,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_49",
+    "name": "Платяной шкаф",
+    "description": "Максимальный комфорт. Платяной шкаф - отличный выбор!",
+    "price": 100,
+    "currency": "rubles"
+  },
+  {
+    "id": "furniture_50",
+    "name": "Гардеробная система",
+    "description": "Дизайнерское решение. Гардеробная система - отличный выбор!",
+    "price": 475,
+    "currency": "butts"
+  },
+  {
+    "id": "furniture_51",
+    "name": "Органайзер",
+    "description": "Уют и комфорт вашего дома. Органайзер - отличный выбор!",
+    "price": 163,
+    "currency": "rubles"
+  }
+]

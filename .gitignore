@@ -1,69 +1,54 @@
-```
-# Configuration and data files
-config.json
-*.json
+```python
+# Compiled and build artifacts
+*.pyc
+__pycache__/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.class
+*.out
 
-# Logs and temporary files
-*.log
-*.tmp
-
-# Environment variables
+# Dependencies
+.venv/
+venv/
 .env
 .env.local
 *.env.*
 
-# Editor/IDE files
-.vscode/
-.idea/
+# Logs and temp files
+*.log
+*.tmp
 *.swp
 *.swo
 
-# Python specific
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
+# Editors
+.vscode/
+.idea/
 
-# Build artifacts
+# Distribution / build artifacts
 dist/
 build/
-*.o
-*.obj
-*.out
+target/
+*.tar.gz
+*.zip
+*.gz
+*.bz2
 
-# Dependencies
-node_modules/
-venv/
-.venv/
-.mypy_cache/
-.pytest_cache/
+# Coverage
 .coverage
 coverage/
 htmlcov/
 
-# System files
-.DS_Store
-Thumbs.db
-
-# Compressed files
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
+# Python specific
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.so
+.PyInstaller/
+.pytest_cache/
+.mypy_cache/
 ```
