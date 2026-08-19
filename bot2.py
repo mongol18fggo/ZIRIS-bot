@@ -8956,19 +8956,32 @@ def cmd_to_award_item(message: types.Message):
         bot.reply_to(message, "Нельзя выдать предмет боту.")
         return
 
-    parts = message.text.split(maxsplit=4)
-    if len(parts) < 5:
+    # Parse arguments using '|' as delimiter
+    # Format: /to_award_item emoji|name|description|amount
+    text = message.text
+    if not text:
+        bot.reply_to(message, "⚠️ Пустая команда.")
+        return
+
+    # Remove command part
+    if text.startswith("/to_award_item"):
+        text = text[len("/to_award_item"):].strip()
+
+    parts = text.split("|")
+    if len(parts) < 4:
         bot.reply_to(message,
-            "⚠️ Использование: /to_award_item {эмоджи} {название} {описание} {сколько}\n"
-            "Пример: /to_award_item 🎮 Игровая приставка Ретро консоль 90х 1"
+            "⚠️ Использование: /to_award_item {эмоджи}|{название}|{описание}|{сколько}\n"
+            "Пример: /to_award_item 🎮|Игровая приставка|Ретро консоль 90х|1"
         )
         return
 
-    emoji = parts[1].strip()
-    item_name = parts[2].strip()
-    item_desc = parts[3].strip()
+    emoji = parts[0].strip()
+    item_name = parts[1].strip()
+    item_desc = parts[2].strip()
+    amount_str = parts[3].strip()
+
     try:
-        amount = int(parts[4].strip())
+        amount = int(amount_str)
         if amount <= 0:
             raise ValueError()
     except ValueError:

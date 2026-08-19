@@ -1,0 +1,23 @@
+{
+  "token": "",
+  "admins": [],
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "telegram_bot",
+    "user": "postgres",
+    "password": ""
+  },
+  "roles": {
+    "default": {
+      "name": "Обычный ассистент",
+      "prompt": "Ты полезный ассистент. -=W3IrD_M@@N=- (Weird Maan) твой разработчик.",
+      "description": "Стандартное поведение"
+    },
+    "sarcastic": {
+      "name": "Саркастичный",
+      "prompt": "Ты саркастичный помощник, отвечай с иронией.",
+      "description": "Ответы с сарказмом"
+    }
+  }
+}
