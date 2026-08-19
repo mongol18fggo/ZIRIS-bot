@@ -1,1 +1,352 @@
-
+[
+  {
+    "id": "gifts_1",
+    "name": "Подарочная коробка",
+    "description": "Неожиданная радость. Подарочная коробка - отличный выбор!",
+    "price": 194,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_2",
+    "name": "Цветочный букет",
+    "description": "Подарок мечты. Цветочный букет - отличный выбор!",
+    "price": 201,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_3",
+    "name": "Шоколадный набор",
+    "description": "Сюрприз дня. Шоколадный набор - отличный выбор!",
+    "price": 444,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_4",
+    "name": "Конфеты",
+    "description": "Подарок, который запомнится. Конфеты - отличный выбор!",
+    "price": 102,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_5",
+    "name": "Подарочный сертификат",
+    "description": "Памятный презент. Подарочный сертификат - отличный выбор!",
+    "price": 403,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_6",
+    "name": "Книга",
+    "description": "Неожиданная радость. Книга - отличный выбор!",
+    "price": 145,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_7",
+    "name": "Игра настольная",
+    "description": "Подарок, который запомнится. Игра настольная - отличный выбор!",
+    "price": 39,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_8",
+    "name": "Пазл",
+    "description": "Выразите свои чувства. Пазл - отличный выбор!",
+    "price": 451,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_9",
+    "name": "Набор для творчества",
+    "description": "Внимание в деталях. Набор для творчества - отличный выбор!",
+    "price": 188,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_10",
+    "name": "Косметический набор",
+    "description": "Неожиданная радость. Косметический набор - отличный выбор!",
+    "price": 416,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_11",
+    "name": "Парфюм",
+    "description": "Выразите свои чувства. Парфюм - отличный выбор!",
+    "price": 94,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_12",
+    "name": "Крем",
+    "description": "Внимание в деталях. Крем - отличный выбор!",
+    "price": 173,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_13",
+    "name": "Маска для лица",
+    "description": "Трогательный жест. Маска для лица - отличный выбор!",
+    "price": 408,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_14",
+    "name": "Шампунь",
+    "description": "Неожиданная радость. Шампунь - отличный выбор!",
+    "price": 21,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_15",
+    "name": "Гель для душа",
+    "description": "Подарок со смыслом. Гель для душа - отличный выбор!",
+    "price": 317,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_16",
+    "name": "Мыло",
+    "description": "Внимание в деталях. Мыло - отличный выбор!",
+    "price": 154,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_17",
+    "name": "Свечи ароматические",
+    "description": "Подарок со смыслом. Свечи ароматические - отличный выбор!",
+    "price": 472,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_18",
+    "name": "Ваза",
+    "description": "Памятный презент. Ваза - отличный выбор!",
+    "price": 181,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_19",
+    "name": "Статуэтка",
+    "description": "Сюрприз дня. Статуэтка - отличный выбор!",
+    "price": 194,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_20",
+    "name": "Фоторамка",
+    "description": "Для важного человека. Фоторамка - отличный выбор!",
+    "price": 24,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_21",
+    "name": "Часы настенные",
+    "description": "Неожиданная радость. Часы настенные - отличный выбор!",
+    "price": 208,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_22",
+    "name": "Будильник",
+    "description": "Для торжества. Будильник - отличный выбор!",
+    "price": 180,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_23",
+    "name": "Термос",
+    "description": "Подарок, который запомнится. Термос - отличный выбор!",
+    "price": 89,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_24",
+    "name": "Кружка",
+    "description": "Лучший выбор. Кружка - отличный выбор!",
+    "price": 177,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_25",
+    "name": "Бокал",
+    "description": "Сюрприз для близких. Бокал - отличный выбор!",
+    "price": 403,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_26",
+    "name": "Набор посуды",
+    "description": "Эмоции в коробке. Набор посуды - отличный выбор!",
+    "price": 225,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_27",
+    "name": "Скатерть",
+    "description": "Для важного человека. Скатерть - отличный выбор!",
+    "price": 221,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_28",
+    "name": "Салфетки",
+    "description": "Выразите свои чувства. Салфетки - отличный выбор!",
+    "price": 61,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_29",
+    "name": "Плед",
+    "description": "Подарок, который запомнится. Плед - отличный выбор!",
+    "price": 166,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_30",
+    "name": "Полотенце",
+    "description": "Подарок со смыслом. Полотенце - отличный выбор!",
+    "price": 395,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_31",
+    "name": "Халат",
+    "description": "Для особых случаев. Халат - отличный выбор!",
+    "price": 456,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_32",
+    "name": "Тапочки",
+    "description": "Внимание в деталях. Тапочки - отличный выбор!",
+    "price": 211,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_33",
+    "name": "Носки",
+    "description": "Внимание в деталях. Носки - отличный выбор!",
+    "price": 170,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_34",
+    "name": "Перчатки",
+    "description": "Для самых любимых. Перчатки - отличный выбор!",
+    "price": 191,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_35",
+    "name": "Шарф",
+    "description": "Неожиданная радость. Шарф - отличный выбор!",
+    "price": 171,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_36",
+    "name": "Шапка",
+    "description": "Знак любви и заботы. Шапка - отличный выбор!",
+    "price": 63,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_37",
+    "name": "Зонт",
+    "description": "Эмоции в коробке. Зонт - отличный выбор!",
+    "price": 435,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_38",
+    "name": "Солнцезащитные очки",
+    "description": "Лучший выбор. Солнцезащитные очки - отличный выбор!",
+    "price": 60,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_39",
+    "name": "Сумка",
+    "description": "Для торжества. Сумка - отличный выбор!",
+    "price": 216,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_40",
+    "name": "Рюкзак",
+    "description": "Внимание в деталях. Рюкзак - отличный выбор!",
+    "price": 227,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_41",
+    "name": "Портмоне",
+    "description": "Знак любви и заботы. Портмоне - отличный выбор!",
+    "price": 70,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_42",
+    "name": "Косметичка",
+    "description": "Выразите свои чувства. Косметичка - отличный выбор!",
+    "price": 159,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_43",
+    "name": "Дорожная сумка",
+    "description": "Сюрприз дня. Дорожная сумка - отличный выбор!",
+    "price": 2,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_44",
+    "name": "Чехол для телефона",
+    "description": "Знак любви и заботы. Чехол для телефона - отличный выбор!",
+    "price": 150,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_45",
+    "name": "Наушники",
+    "description": "Сюрприз для близких. Наушники - отличный выбор!",
+    "price": 89,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_46",
+    "name": "Powerbank",
+    "description": "Трогательный жест. Powerbank - отличный выбор!",
+    "price": 123,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_47",
+    "name": "USB-флешка",
+    "description": "Неожиданная радость. USB-флешка - отличный выбор!",
+    "price": 339,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_48",
+    "name": "Беспроводная мышь",
+    "description": "Внимание в деталях. Беспроводная мышь - отличный выбор!",
+    "price": 282,
+    "currency": "butts"
+  },
+  {
+    "id": "gifts_49",
+    "name": "Клавиатура",
+    "description": "Знак любви и заботы. Клавиатура - отличный выбор!",
+    "price": 115,
+    "currency": "rubles"
+  },
+  {
+    "id": "gifts_50",
+    "name": "Коврик для мыши",
+    "description": "Выразите свои чувства. Коврик для мыши - отличный выбор!",
+    "price": 43,
+    "currency": "rubles"
+  }
+]

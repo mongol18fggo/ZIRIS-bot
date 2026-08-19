@@ -348,6 +348,7 @@ def create_tables():
         code TEXT NOT NULL UNIQUE,
         reward_type TEXT NOT NULL,
         reward_amount INTEGER NOT NULL,
+        reward_item_data JSONB DEFAULT NULL,
         max_uses INTEGER NOT NULL,
         uses INTEGER DEFAULT 0,
         created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1081,6 +1082,98 @@ def add_award(uid: str, award_name: str) -> None:
     awards = get_awards(uid)
     awards.append({"name": award_name, "date": datetime.now().strftime("%d.%m.%Y")})
     update_user(uid, awards=json.dumps(awards))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Item System Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ITEMS_DIR = os.path.join(BASE_DIR, "items")
+
+def load_categories() -> dict:
+    """Load categories from items/categories.json"""
+    path = os.path.join(ITEMS_DIR, "categories.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def load_category_items(category_key: str) -> list:
+    """Load items for a specific category from items/{category}.json"""
+    path = os.path.join(ITEMS_DIR, f"{category_key}.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def give_item_to_user(uid: str, item_id: str, item_name: str, item_desc: str, 
+                      category: str, price: int, currency: str, by_creator: bool = False) -> bool:
+    """Give an item to a user. Returns True on success."""
+    try:
+        db_execute(
+            "INSERT INTO user_items (user_id, item_id, item_name, item_description, category, price, currency, given_by_creator) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (str(uid), item_id, item_name, item_desc, category, price, currency, by_creator)
+        )
+        return True
+    except Exception as e:
+        log_err("ITEMS", f"Error giving item to user: {e}")
+        return False
+
+def get_user_inventory(uid: str) -> list:
+    """Get all items owned by a user."""
+    results = db_execute(
+        "SELECT id, item_id, item_name, item_description, category, price, currency, given_by_creator, obtained_at "
+        "FROM user_items WHERE user_id = %s ORDER BY obtained_at DESC",
+        (str(uid),), fetch=True
+    )
+    if not results:
+        return []
+    return [
+        {
+            "id": r[0],
+            "item_id": r[1],
+            "name": r[2],
+            "description": r[3],
+            "category": r[4],
+            "price": r[5],
+            "currency": r[6],
+            "given_by_creator": r[7],
+            "obtained_at": r[8]
+        }
+        for r in results
+    ]
+
+def delete_user_item(item_db_id: int, uid: str) -> bool:
+    """Delete an item from user inventory. Returns True if deleted."""
+    try:
+        result = db_execute(
+            "DELETE FROM user_items WHERE id = %s AND user_id = %s",
+            (item_db_id, str(uid))
+        )
+        return True
+    except Exception as e:
+        log_err("ITEMS", f"Error deleting item: {e}")
+        return False
+
+def get_item_by_db_id(item_db_id: int, uid: str) -> Optional[dict]:
+    """Get a specific item from user inventory."""
+    result = db_execute(
+        "SELECT id, item_id, item_name, item_description, category, price, currency, given_by_creator "
+        "FROM user_items WHERE id = %s AND user_id = %s",
+        (item_db_id, str(uid)), fetch=True, fetch_one=True
+    )
+    if not result:
+        return None
+    return {
+        "db_id": result[0],
+        "item_id": result[1],
+        "name": result[2],
+        "description": result[3],
+        "category": result[4],
+        "price": result[5],
+        "currency": result[6],
+        "given_by_creator": result[7]
+    }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Pathogen / Virus Helpers

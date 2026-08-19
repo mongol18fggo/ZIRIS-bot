@@ -1,1 +1,352 @@
-
+[
+  {
+    "id": "trinkets_1",
+    "name": "Брелок",
+    "description": "Символ удачи. Брелок - отличный выбор!",
+    "price": 49,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_2",
+    "name": "Магнит на холодильник",
+    "description": "Для коллекции. Магнит на холодильник - отличный выбор!",
+    "price": 29,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_3",
+    "name": "Открытка",
+    "description": "Небольшой, но приятный. Открытка - отличный выбор!",
+    "price": 344,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_4",
+    "name": "Значок",
+    "description": "Для души и настроения. Значок - отличный выбор!",
+    "price": 336,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_5",
+    "name": "Наклейка",
+    "description": "Приятная мелочь. Наклейка - отличный выбор!",
+    "price": 42,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_6",
+    "name": "Браслет",
+    "description": "Оригинальный подарок. Браслет - отличный выбор!",
+    "price": 145,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_7",
+    "name": "Серьги",
+    "description": "Прекрасное дополнение. Серьги - отличный выбор!",
+    "price": 95,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_8",
+    "name": "Кольцо",
+    "description": "Милый сувенир. Кольцо - отличный выбор!",
+    "price": 213,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_9",
+    "name": "Подвеска",
+    "description": "Для украшения быта. Подвеска - отличный выбор!",
+    "price": 198,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_10",
+    "name": "Цепочка",
+    "description": "Сюрприз для друзей. Цепочка - отличный выбор!",
+    "price": 45,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_11",
+    "name": "Кулон",
+    "description": "Изюминка образа. Кулон - отличный выбор!",
+    "price": 209,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_12",
+    "name": "Заколка",
+    "description": "Деталь, которая важна. Заколка - отличный выбор!",
+    "price": 4,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_13",
+    "name": "Резинка для волос",
+    "description": "Милый сувенир. Резинка для волос - отличный выбор!",
+    "price": 257,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_14",
+    "name": "Ободок",
+    "description": "Памятный предмет. Ободок - отличный выбор!",
+    "price": 11,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_15",
+    "name": "Колье",
+    "description": "Знак внимания. Колье - отличный выбор!",
+    "price": 55,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_16",
+    "name": "Серьги-гвоздики",
+    "description": "Символ удачи. Серьги-гвоздики - отличный выбор!",
+    "price": 382,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_17",
+    "name": "Брошь",
+    "description": "Изюминка образа. Брошь - отличный выбор!",
+    "price": 249,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_18",
+    "name": "Запонки",
+    "description": "Деталь, которая важна. Запонки - отличный выбор!",
+    "price": 182,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_19",
+    "name": "Галстук",
+    "description": "Небольшой, но приятный. Галстук - отличный выбор!",
+    "price": 94,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_20",
+    "name": "Бабочка",
+    "description": "Деталь, которая важна. Бабочка - отличный выбор!",
+    "price": 178,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_21",
+    "name": "Ремень",
+    "description": "Для хорошего настроения. Ремень - отличный выбор!",
+    "price": 198,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_22",
+    "name": "Кошелек",
+    "description": "Деталь, которая важна. Кошелек - отличный выбор!",
+    "price": 152,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_23",
+    "name": "Ключница",
+    "description": "Милый сувенир. Ключница - отличный выбор!",
+    "price": 454,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_24",
+    "name": "Визитница",
+    "description": "Изюминка образа. Визитница - отличный выбор!",
+    "price": 140,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_25",
+    "name": "Ежедневник",
+    "description": "Изюминка образа. Ежедневник - отличный выбор!",
+    "price": 237,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_26",
+    "name": "Ручка",
+    "description": "Небольшой, но приятный. Ручка - отличный выбор!",
+    "price": 170,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_27",
+    "name": "Карандаш",
+    "description": "Для души и настроения. Карандаш - отличный выбор!",
+    "price": 39,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_28",
+    "name": "Ластик",
+    "description": "Символ удачи. Ластик - отличный выбор!",
+    "price": 138,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_29",
+    "name": "Точилка",
+    "description": "Небольшой, но приятный. Точилка - отличный выбор!",
+    "price": 126,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_30",
+    "name": "Степлер",
+    "description": "Маленькая радость. Степлер - отличный выбор!",
+    "price": 29,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_31",
+    "name": "Скрепки",
+    "description": "Красивая безделушка. Скрепки - отличный выбор!",
+    "price": 104,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_32",
+    "name": "Кнопки",
+    "description": "Символ удачи. Кнопки - отличный выбор!",
+    "price": 204,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_33",
+    "name": "Закладка",
+    "description": "Памятный предмет. Закладка - отличный выбор!",
+    "price": 44,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_34",
+    "name": "Дневник",
+    "description": "Небольшой, но приятный. Дневник - отличный выбор!",
+    "price": 127,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_35",
+    "name": "Фотоальбом",
+    "description": "Знак внимания. Фотоальбом - отличный выбор!",
+    "price": 126,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_36",
+    "name": "Рамка для фото",
+    "description": "Для души и настроения. Рамка для фото - отличный выбор!",
+    "price": 176,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_37",
+    "name": "Свеча",
+    "description": "Символ удачи. Свеча - отличный выбор!",
+    "price": 108,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_38",
+    "name": "Ароматизатор",
+    "description": "Прекрасное дополнение. Ароматизатор - отличный выбор!",
+    "price": 63,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_39",
+    "name": "Мыло ручной работы",
+    "description": "Прекрасное дополнение. Мыло ручной работы - отличный выбор!",
+    "price": 239,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_40",
+    "name": "Маленькая фигурка",
+    "description": "Памятный предмет. Маленькая фигурка - отличный выбор!",
+    "price": 51,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_41",
+    "name": "Кристальный шар",
+    "description": "Милый сувенир. Кристальный шар - отличный выбор!",
+    "price": 268,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_42",
+    "name": "Ловец снов",
+    "description": "Маленькая радость. Ловец снов - отличный выбор!",
+    "price": 246,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_43",
+    "name": "Ветрячок",
+    "description": "Сюрприз для друзей. Ветрячок - отличный выбор!",
+    "price": 171,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_44",
+    "name": "Колокольчик",
+    "description": "Красивая безделушка. Колокольчик - отличный выбор!",
+    "price": 139,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_45",
+    "name": "Музыкальная шкатулка",
+    "description": "Символ удачи. Музыкальная шкатулка - отличный выбор!",
+    "price": 235,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_46",
+    "name": "Мини-статуэтка",
+    "description": "Милый сувенир. Мини-статуэтка - отличный выбор!",
+    "price": 192,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_47",
+    "name": "Сувенир",
+    "description": "Очаровательная вещица. Сувенир - отличный выбор!",
+    "price": 210,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_48",
+    "name": "Магический шар",
+    "description": "Прекрасное дополнение. Магический шар - отличный выбор!",
+    "price": 360,
+    "currency": "butts"
+  },
+  {
+    "id": "trinkets_49",
+    "name": "Талисман",
+    "description": "Памятный предмет. Талисман - отличный выбор!",
+    "price": 46,
+    "currency": "rubles"
+  },
+  {
+    "id": "trinkets_50",
+    "name": "Амулет",
+    "description": "Небольшой, но приятный. Амулет - отличный выбор!",
+    "price": 276,
+    "currency": "butts"
+  }
+]
