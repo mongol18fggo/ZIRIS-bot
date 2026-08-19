@@ -3324,6 +3324,10 @@ def can_award(message: types.Message) -> bool:
     """Check if the user can award others — must be a group admin or bot admin."""
     return is_group_admin(message)
 
+def is_bot_creator(message: types.Message) -> bool:
+    """Check if the user is the bot creator (from ADMIN_USERNAMES)."""
+    return is_admin(message)
+
 def get_display_name(user) -> str:
     """Get a display name from a Telegram user object."""
     if user.username:
@@ -8372,7 +8376,629 @@ def cmd_to_award(message: types.Message):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Reminder Checker Thread
+# Items & Shop System Commands
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["items"])
+def cmd_items(message: types.Message):
+    """Show user's inventory - 5 items per page."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    
+    inventory = get_user_inventory(uid)
+    
+    if not inventory:
+        bot.reply_to(message, "📦 У тебя пока нет предметов. Посети /shop чтобы купить что-нибудь!")
+        return
+    
+    # Store pagination state in a simple way - show first page
+    page = 0
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    
+    # Check for page argument
+    parts = message.text.split()
+    if len(parts) > 1:
+        try:
+            page = int(parts[1]) - 1
+            if page < 0:
+                page = 0
+            if page >= total_pages:
+                page = total_pages - 1
+        except ValueError:
+            pass
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if item.get("given_by_creator") else ""
+        currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {item['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {item['price']} {currency_symbol}\n"
+        text += f"   Категория: {item['category']}\n\n"
+    
+    if total_pages > 1:
+        text += "\nИспользуй /items <номер страницы> для навигации.\n"
+        text += "Нажми на предмет чтобы увидеть описание и уничтожить его."
+    
+    # Create inline keyboard with items
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in page_items:
+        btn_text = f"📦 {item['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{item['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.reply_to(message, text, reply_markup=markup)
+
+
+@bot.message_handler(commands=["shop", "store"])
+def cmd_shop(message: types.Message):
+    """Show shop categories."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    
+    categories = load_categories()
+    
+    if not categories:
+        bot.reply_to(message, "🏪 Магазин временно недоступен.")
+        return
+    
+    text = "🏪 <b>Добро пожаловать в магазин!</b>\n\nВыберите категорию:\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat_key, cat_data in categories.items():
+        cat_name = cat_data.get("name", cat_key)
+        cat_emoji = cat_data.get("emoji", "📦")
+        btn_text = f"{cat_emoji} {cat_name}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_cat:{cat_key}"))
+    
+    bot.reply_to(message, text, reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("items_page:"))
+def callback_items_page(call: types.CallbackQuery):
+    """Handle items pagination."""
+    uid = str(call.from_user.id)
+    page_data = call.data.split(":")[1]
+    page = int(page_data)
+    
+    inventory = get_user_inventory(uid)
+    if not inventory:
+        bot.answer_callback_query(call.id, "У тебя нет предметов.")
+        return
+    
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if item.get("given_by_creator") else ""
+        currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {item['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {item['price']} {currency_symbol}\n"
+        text += f"   Категория: {item['category']}\n\n"
+    
+    if total_pages > 1:
+        text += "\nИспользуй кнопки для навигации.\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in page_items:
+        btn_text = f"📦 {item['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{item['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_cat:"))
+def callback_shop_category(call: types.CallbackQuery):
+    """Handle shop category selection - show 10 items per page."""
+    cat_key = call.data.split(":")[1]
+    categories = load_categories()
+    
+    if cat_key not in categories:
+        bot.answer_callback_query(call.id, "Категория не найдена.")
+        return
+    
+    cat_data = categories[cat_key]
+    cat_name = cat_data.get("name", cat_key)
+    cat_emoji = cat_data.get("emoji", "📦")
+    
+    items = load_category_items(cat_key)
+    if not items:
+        bot.answer_callback_query(call.id, "В этой категории пока нет товаров.")
+        return
+    
+    # Store page in callback data or default to 0
+    page = 0
+    items_per_page = 10
+    total_pages = (len(items) + items_per_page - 1) // items_per_page
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(items))
+    page_items = items[start_idx:end_idx]
+    
+    text = f"{cat_emoji} <b>{cat_name}</b>\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        currency_symbol = "🚬" if item.get("currency") == "butts" or item.get("currency") == "cigarettes" else "₽"
+        text += f"<b>{i + 1}. {item['name']}</b> - {item['price']} {currency_symbol}\n"
+    
+    text += f"\nСтраница {page + 1}/{total_pages}"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, item in enumerate(page_items, start=start_idx):
+        btn_text = f"🛒 {item['name']} - {item['price']} {'🚬' if item.get('currency') == 'butts' else '₽'}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_item:{cat_key}:{item['id']}"))
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"shop_cat_page:{cat_key}:{page - 1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"shop_cat_page:{cat_key}:{page + 1}"))
+    nav_buttons.append(types.InlineKeyboardButton("🔙 В меню категорий", callback_data="shop_menu"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_cat_page:"))
+def callback_shop_category_page(call: types.CallbackQuery):
+    """Handle shop category pagination."""
+    parts = call.data.split(":")
+    cat_key = parts[1]
+    page = int(parts[2])
+    
+    categories = load_categories()
+    if cat_key not in categories:
+        bot.answer_callback_query(call.id, "Категория не найдена.")
+        return
+    
+    cat_data = categories[cat_key]
+    cat_name = cat_data.get("name", cat_key)
+    cat_emoji = cat_data.get("emoji", "📦")
+    
+    items = load_category_items(cat_key)
+    if not items:
+        bot.answer_callback_query(call.id, "В этой категории пока нет товаров.")
+        return
+    
+    items_per_page = 10
+    total_pages = (len(items) + items_per_page - 1) // items_per_page
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(items))
+    page_items = items[start_idx:end_idx]
+    
+    text = f"{cat_emoji} <b>{cat_name}</b>\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        currency_symbol = "🚬" if item.get("currency") == "butts" or item.get("currency") == "cigarettes" else "₽"
+        text += f"<b>{i + 1}. {item['name']}</b> - {item['price']} {currency_symbol}\n"
+    
+    text += f"\nСтраница {page + 1}/{total_pages}"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, item in enumerate(page_items, start=start_idx):
+        btn_text = f"🛒 {item['name']} - {item['price']} {'🚬' if item.get('currency') == 'butts' else '₽'}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_item:{cat_key}:{item['id']}"))
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"shop_cat_page:{cat_key}:{page - 1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"shop_cat_page:{cat_key}:{page + 1}"))
+    nav_buttons.append(types.InlineKeyboardButton("🔙 В меню категорий", callback_data="shop_menu"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "shop_menu")
+def callback_shop_menu(call: types.CallbackQuery):
+    """Return to shop main menu."""
+    categories = load_categories()
+    
+    text = "🏪 <b>Добро пожаловать в магазин!</b>\n\nВыберите категорию:\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat_key, cat_data in categories.items():
+        cat_name = cat_data.get("name", cat_key)
+        cat_emoji = cat_data.get("emoji", "📦")
+        btn_text = f"{cat_emoji} {cat_name}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_cat:{cat_key}"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_item:"))
+def callback_shop_item(call: types.CallbackQuery):
+    """Show item details and buy option."""
+    parts = call.data.split(":")
+    cat_key = parts[1]
+    item_id = parts[2]
+    
+    items = load_category_items(cat_key)
+    item = None
+    for it in items:
+        if it["id"] == item_id:
+            item = it
+            break
+    
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден.")
+        return
+    
+    currency_symbol = "🚬" if item.get("currency") == "butts" or item.get("currency") == "cigarettes" else "₽"
+    currency_name = "окурков" if item.get("currency") == "butts" else "сигарет" if item.get("currency") == "cigarettes" else "рублей"
+    
+    text = f"<b>{item['name']}</b>\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"<b>Цена:</b> {item['price']} {currency_symbol} ({currency_name})\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("💰 Купить", callback_data=f"shop_buy:{cat_key}:{item_id}"))
+    markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"shop_cat:{cat_key}"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_buy:"))
+def callback_shop_buy(call: types.CallbackQuery):
+    """Handle item purchase."""
+    uid = str(call.from_user.id)
+    parts = call.data.split(":")
+    cat_key = parts[1]
+    item_id = parts[2]
+    
+    items = load_category_items(cat_key)
+    item = None
+    for it in items:
+        if it["id"] == item_id:
+            item = it
+            break
+    
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден.")
+        return
+    
+    price = item["price"]
+    currency = item.get("currency", "rubles")
+    
+    # Check user balance
+    if currency == "rubles":
+        user_rubles = get_user_rubles(uid)
+        if user_rubles < price:
+            bot.answer_callback_query(call.id, f"Недостаточно рублей! Нужно {price}, у тебя {user_rubles}", show_alert=True)
+            return
+        # Deduct rubles
+        set_user_rubles(uid, user_rubles - price)
+    elif currency in ("butts", "cigarettes"):
+        user_butts = get_user_cigarettes(uid)
+        if user_butts < price:
+            bot.answer_callback_query(call.id, f"Недостаточно окурков! Нужно {price}, у тебя {user_butts}", show_alert=True)
+            return
+        # Deduct butts
+        set_user_cigarettes(uid, user_butts - price)
+    else:
+        bot.answer_callback_query(call.id, "Неизвестная валюта.")
+        return
+    
+    # Give item to user
+    give_item_to_user(uid, item["id"], item["name"], item["description"], cat_key, price, currency, by_creator=False)
+    
+    bot.answer_callback_query(call.id, f"✅ Куплено: {item['name']}!", show_alert=True)
+    
+    # Update message
+    currency_symbol = "🚬" if currency in ("butts", "cigarettes") else "₽"
+    text = f"<b>{item['name']}</b>\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"<b>Цена:</b> {price} {currency_symbol}\n"
+    text += f"\n✅ <i>Куплено!</i>"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🔙 В категорию", callback_data=f"shop_cat:{cat_key}"))
+    markup.add(types.InlineKeyboardButton("🏪 В меню магазина", callback_data="shop_menu"))
+    markup.add(types.InlineKeyboardButton("📦 Мои предметы", callback_data=f"items_list:{uid}"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("item_view:"))
+def callback_item_view(call: types.CallbackQuery):
+    """Show item details from inventory with destroy option."""
+    item_db_id_str = call.data.split(":")[1]
+    try:
+        item_db_id = int(item_db_id_str)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Ошибка.")
+        return
+    
+    uid = str(call.from_user.id)
+    item = get_item_by_db_id(item_db_id, uid)
+    
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден.")
+        return
+    
+    creator_mark = " 👑 <i>(выдано создателем бота)</i>" if item.get("given_by_creator") else ""
+    currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+    
+    text = f"<b>{item['name']}</b>{creator_mark}\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"<b>Цена:</b> {item['price']} {currency_symbol}\n"
+    text += f"<b>Категория:</b> {item['category']}\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("🗑️ Уничтожить", callback_data=f"item_destroy:{item_db_id}"))
+    markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="items_back"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("item_destroy:"))
+def callback_item_destroy(call: types.CallbackQuery):
+    """Destroy an item from inventory."""
+    uid = str(call.from_user.id)
+    item_db_id_str = call.data.split(":")[1]
+    try:
+        item_db_id = int(item_db_id_str)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Ошибка.")
+        return
+    
+    item = get_item_by_db_id(item_db_id, uid)
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден или уже уничтожен.")
+        return
+    
+    delete_user_item(item_db_id, uid)
+    bot.answer_callback_query(call.id, f"🗑️ {item['name']} уничтожен!", show_alert=True)
+    
+    # Show updated inventory
+    cmd_items_call = types.Message(chat=call.message.chat, from_user=call.from_user, message_id=call.message.message_id, text="/items")
+    # Just send a new message with inventory
+    inventory = get_user_inventory(uid)
+    if not inventory:
+        bot.edit_message_text("📦 У тебя больше нет предметов.", call.message.chat.id, call.message.message_id)
+        return
+    
+    page = 0
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, itm in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if itm.get("given_by_creator") else ""
+        currency_symbol = "🚬" if itm["currency"] == "cigarettes" else "₽" if itm["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {itm['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {itm['price']} {currency_symbol}\n"
+        text += f"   Категория: {itm['category']}\n\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for itm in page_items:
+        btn_text = f"📦 {itm['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{itm['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "items_back")
+def callback_items_back(call: types.CallbackQuery):
+    """Return to items list."""
+    uid = str(call.from_user.id)
+    inventory = get_user_inventory(uid)
+    
+    if not inventory:
+        bot.edit_message_text("📦 У тебя пока нет предметов.", call.message.chat.id, call.message.message_id)
+        return
+    
+    page = 0
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if item.get("given_by_creator") else ""
+        currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {item['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {item['price']} {currency_symbol}\n"
+        text += f"   Категория: {item['category']}\n\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in page_items:
+        btn_text = f"📦 {item['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{item['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("items_list:"))
+def callback_items_list_from_shop(call: types.CallbackQuery):
+    """Show items list when called from shop."""
+    uid = call.data.split(":")[1]
+    # Reuse cmd_items logic
+    cmd_items_msg = types.Message(chat=call.message.chat, from_user=call.from_user, message_id=call.message.message_id, text="/items")
+    cmd_items(cmd_items_msg)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Award Command (updated for to_award_item)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["to_award"])
+def cmd_to_award(message: types.Message):
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+
+    if not can_award(message):
+        log_cmd(uid, username, "to_award", "DENIED - not admin")
+        bot.reply_to(message, "У тебя нет прав для награждения. Только админ группы или создатель бота могут награждать.")
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "Ответь на сообщение человека, которого хочешь наградить.")
+        return
+
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        bot.reply_to(message, "Нельзя наградить бота.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        bot.reply_to(message, "Использование: /to_award &lt;название награды&gt; (в ответ на сообщение)\nПример: /to_award Лучший курильщик")
+        return
+
+    award_name = parts[1].strip()
+    target_uid = str(target.id)
+    get_or_create_user(target_uid)
+
+    add_award(target_uid, award_name)
+    target_display = get_display_name(target)
+
+    log_cmd(uid, username, "to_award", f"target={target_uid} | award='{award_name}'")
+
+    bot.reply_to(message,
+        f"🏅 <b>Награда вручена!</b>\n\n"
+        f"Пользователь <b>{target_display}</b> получил награду: <b>{award_name}</b>\n\n"
+        f"Награда отображается в /stats."
+    )
+
+
+@bot.message_handler(commands=["to_award_item"])
+def cmd_to_award_item(message: types.Message):
+    """Give any item to a user (creator only). Usage: /to_award_item {emoji} {name} {description} {amount}"""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+
+    # Only bot creator can use this
+    if not is_bot_creator(message):
+        log_cmd(uid, username, "to_award_item", "DENIED - not creator")
+        bot.reply_to(message, "⛔ Только создатель бота может выдавать предметы этой командой.")
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "⚠️ Ответь на сообщение человека, которому хочешь выдать предмет.")
+        return
+
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        bot.reply_to(message, "Нельзя выдать предмет боту.")
+        return
+
+    parts = message.text.split(maxsplit=4)
+    if len(parts) < 5:
+        bot.reply_to(message,
+            "⚠️ Использование: /to_award_item {эмоджи} {название} {описание} {сколько}\n"
+            "Пример: /to_award_item 🎮 Игровая приставка Ретро консоль 90х 1"
+        )
+        return
+
+    emoji = parts[1].strip()
+    item_name = parts[2].strip()
+    item_desc = parts[3].strip()
+    try:
+        amount = int(parts[4].strip())
+        if amount <= 0:
+            raise ValueError()
+    except ValueError:
+        bot.reply_to(message, "Количество должно быть положительным числом.")
+        return
+
+    target_uid = str(target.id)
+    get_or_create_user(target_uid)
+
+    # Give the item(s)
+    given_count = 0
+    for i in range(amount):
+        unique_id = f"custom_{target_uid}_{int(time.time())}_{i}"
+        if give_item_to_user(target_uid, unique_id, f"{emoji} {item_name}", item_desc, "custom", 0, "rubles", by_creator=True):
+            given_count += 1
+
+    target_display = get_display_name(target)
+    log_cmd(uid, username, "to_award_item", f"target={target_uid} | item={item_name} | count={given_count}")
+
+    bot.reply_to(message,
+        f"✅ <b>Предмет(ы) выданы!</b>\n\n"
+        f"Пользователь <b>{target_display}</b> получил: <b>{emoji} {item_name}</b>\n"
+        f"Количество: <b>{given_count}</b> шт.\n"
+        f"Описание: {item_desc}\n\n"
+        f"👑 <i>Выдано создателем бота (отмечено в /items)</i>"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Promo Code Commands (updated for items)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def reminder_checker():
