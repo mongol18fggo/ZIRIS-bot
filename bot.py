@@ -13,6 +13,14 @@ Uses PostgreSQL for data persistence (configure in config.json)
 #   * Изображения скачиваются в папку temp/ рядом с ботом и удаляются после обработки.
 #   * Добавлен дебаг-лог: печатается полный ответ deepseek, а также этапы
 #     поиска, скачивания и удаления файла изображения.
+# 03.11.2026 — Форматирование и статистика:
+#   * Ответы ИИ форматируются в HTML: **жирный**, *курсив*, ***жирный+курсив***,
+#     `код`, ```блоки кода```, ~~зачёркнутый~~ (Markdown от ИИ конвертируется в HTML).
+#   * /stats: корректно показывает статистику (в т.ч. чужую), сообщения разделены
+#     на «с ботом» и «в чате», график общительности строится по данным чата.
+#   * Бот считает ВООБЩЕ ВСЕ сообщения в чате (текст, фото, видео, стикеры,
+#     документы и т.д.) для всех пользователей, даже если бот на них не отвечает.
+#   * Топ по общительности (/top_chat) включает только людей из текущего чата.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -196,6 +204,105 @@ def log_debug(message: str):
     """Отладочный лог (см. переменную окружения DEBUG)."""
     if DEBUG:
         log("DEBUG", "DBG", message)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Markdown -> HTML formatting for AI answers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_+\-#]*\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_ITALIC_RE = re.compile(r"\*\*\*(.+?)\*\*\*")
+_BOLD_STAR_RE = re.compile(r"\*\*(.+?)\*\*")
+_BOLD_UNDERSCORE_RE = re.compile(r"__(.+?)__")
+_STRIKE_RE = re.compile(r"~~(.+?)~~")
+_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+_ITALIC_UNDERSCORE_RE = re.compile(r"(?<!_)_([^_\n]+)_(?!_)")
+
+
+def _md_escape(text: str) -> str:
+    """Экранирует текст для Telegram HTML."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def markdown_to_html(text: str) -> str:
+    """Конвертирует базовый Markdown (как его обычно возвращают ИИ) в Telegram HTML.
+
+    Поддерживается: **жирный**, __жирный__, *курсив*, _курсив_, ***жирный+курсив***,
+    ~~зачёркнутый~~, `код`, ```блоки кода```. Обычный HTML-подобный текст экранируется,
+    чтобы не ломать разметку сообщения.
+    """
+    if not text:
+        return ""
+    placeholders: dict = {}
+
+    def _stash(html_fragment: str) -> str:
+        key = f"\x00PH{len(placeholders)}\x00"
+        placeholders[key] = html_fragment
+        return key
+
+    # 1) Блоки кода ```...``` — содержимое экранируется для HTML как есть
+    def _code_block(m):
+        code = m.group(1).strip("\n")
+        return _stash(f"<pre><code>{_md_escape(code)}</code></pre>")
+
+    text = _CODE_BLOCK_RE.sub(_code_block, text)
+
+    # 2) Остальной текст экранируем, затем применяем inline-разметку поверх placeholder'ов
+    text = _md_escape(text)
+
+    def _inline_code(m):
+        return _stash(f"<code>{m.group(1)}</code>")
+
+    text = _INLINE_CODE_RE.sub(_inline_code, text)
+    text = _BOLD_ITALIC_RE.sub(lambda m: f"<b><i>{m.group(1)}</i></b>", text)
+    text = _BOLD_STAR_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _BOLD_UNDERSCORE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", text)
+    text = _ITALIC_STAR_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+    text = _ITALIC_UNDERSCORE_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+
+    # 3) Возвращаем сохранённые блоки кода
+    for key, frag in placeholders.items():
+        text = text.replace(key, frag)
+    return text
+
+
+def _validate_html(html_text: str) -> bool:
+    """Проверяет, что HTML-разметка корректна для Telegram (парные теги)."""
+    stack: list = []
+    for m in re.finditer(r"<(/?)(b|i|u|s|strike|code|pre|a|tg-spoiler)\b[^>]*>", html_text):
+        closing, tag = m.group(1), m.group(2)
+        if closing:
+            if not stack or stack[-1] != tag:
+                return False
+            stack.pop()
+        else:
+            if tag in ("br", "img"):
+                continue
+            stack.append(tag)
+    return not stack
+
+
+def send_ai_answer(message: types.Message, answer: str) -> None:
+    """Отправляет ответ ИИ с форматированием (Markdown -> HTML).
+
+    Если после конвертации HTML получился невалидным или Telegram его отвергает —
+    сообщение отправляется без parse_mode (спасаются хотя бы переводы строк).
+    """
+    formatted = markdown_to_html(answer)
+    reply_kw = {"reply_to_message_id": message.message_id}
+    thread_id = get_message_thread_id(message)
+    if thread_id is not None:
+        reply_kw["message_thread_id"] = thread_id
+
+    if formatted != answer and _validate_html(formatted):
+        try:
+            bot.send_message(message.chat.id, formatted, parse_mode="HTML", **reply_kw)
+            return
+        except Exception as e:
+            log_err("FORMAT", f"HTML send failed, falling back to plain text: {e}")
+    bot.send_message(message.chat.id, answer, parse_mode=None, **reply_kw)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Config & Initialization
@@ -915,6 +1022,45 @@ def _reply_context_message(_bot_instance, message: types.Message):
 def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
     set_reply_context_from_call(call)
 
+
+ALL_MESSAGE_TYPES = [
+    "text", "audio", "document", "animation", "game", "photo", "sticker",
+    "video", "voice", "video_note", "contact", "location", "venue",
+    "poll", "dice", "story",
+]
+
+
+@bot.message_handler(content_types=ALL_MESSAGE_TYPES)
+def count_all_chat_messages(message: types.Message):
+    """Считает ВООБЩЕ ВСЕ сообщения в чате для статистики общительности.
+
+    Срабатывает на каждое входящее сообщение (текст, фото, видео, стикеры,
+    документы и т.д.), регистрирует автора как участника чата и увеличивает
+    счётчик сообщений этого пользователя в этом чате. Работает даже тогда,
+    когда бот на сообщение не отвечает. Команды (/start и т.п.) из счётчика
+    исключены — они считаются отдельно как команды.
+    """
+    try:
+        user = message.from_user
+        if not user or user.is_bot:
+            return
+        uid = str(user.id)
+        get_or_create_user(uid)
+        if user.username:
+            update_username(uid, user.username)
+        set_first_message_if_null(uid)
+        register_chat(message.chat.id)
+        track_chat_member(message.chat.id, user)
+
+        raw_text = (message.text or "") + " " + (message.caption or "")
+        if raw_text.lstrip().startswith("/"):
+            return  # это команда — её считают командные хендлеры
+
+        increment_stat(uid, "messages")
+        track_daily_chat_activity(uid, message.chat.id)
+    except Exception as e:
+        log_err("MSG_COUNT", f"Failed to count chat message: {e}")
+
 # Silero model
 silero_model = None
 
@@ -1525,7 +1671,11 @@ def get_daily_chat_activity(uid: str, chat_id: Optional[int] = None) -> list:
     return []
 
 def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None) -> list:
-    """Get top users by total messages. table: 'bot' or 'chat'. Chat top is per chat_id."""
+    """Get top users by total messages. table: 'bot' or 'chat'. Chat top is per chat_id.
+
+    Для топа по общительности в чате ('chat') в список попадают ТОЛЬКО пользователи,
+    которые пишут в этом чате (проверка по таблице chat_members).
+    """
     if table == "bot":
         results = db_execute(
             "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
@@ -1535,16 +1685,24 @@ def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None
             fetch=True
         )
     else:
-        params: tuple = (chat_id, limit) if chat_id is not None else (limit,)
-        where = "WHERE da.chat_id = %s " if chat_id is not None else ""
-        results = db_execute(
-            f"SELECT da.user_id, SUM(da.message_count) AS total, u.username "
-            f"FROM daily_chat_activity da JOIN users u ON u.id = da.user_id "
-            f"{where}"
-            f"GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s",
-            params,
-            fetch=True
-        )
+        if chat_id is not None:
+            query = (
+                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
+                "FROM daily_chat_activity da "
+                "JOIN users u ON u.id = da.user_id "
+                "WHERE da.chat_id = %s AND da.user_id IN "
+                "(SELECT user_id FROM chat_members WHERE chat_id = %s) "
+                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+            )
+            params: tuple = (chat_id, chat_id, limit)
+        else:
+            query = (
+                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
+                "FROM daily_chat_activity da JOIN users u ON u.id = da.user_id "
+                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+            )
+            params = (limit,)
+        results = db_execute(query, params, fetch=True)
     if results:
         return [(r[0], int(r[1]), r[2] or "") for r in results]
     return []
@@ -6052,6 +6210,15 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
     if roulette_plays > 0:
         survival_rate = f"{round((roulette_plays - roulette_deaths) / roulette_plays * 100, 1)}%"
 
+    # Считаем реальные суммы из таблиц активности (а не только из stats),
+    # чтобы цифры в /stats всегда совпадали с топами и графиками.
+    bot_msgs = sum(c for _, c in get_daily_activity(target_uid))
+    chat_msgs = sum(c for _, c in get_daily_chat_activity(target_uid))
+    total_msgs = max(int(stats.get("messages", 0) or 0), bot_msgs + chat_msgs)
+
+    def _fmt_num(n: int) -> str:
+        return f"{n:,}".replace(",", " ")
+
     clan_text = f"🏷 Клан: <b>{clan['name']}</b> (реп. {clan['reputation']})" if clan else "🏷 Клан: <i>не состоит</i>"
 
     awards_text = ""
@@ -6067,16 +6234,16 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
         f"🎭 Роль: <b>{current_role}</b>\n"
         f"{clan_text}\n"
         f"💀 Статус: {'Мёртв' if is_user_dead(target_uid) else 'Жив'}\n\n"
-        f"🚬 Окурки: <b>{cigs}</b>\n"
-        f"💰 Рубли: <b>{rubles}₽</b>\n"
-        f"🚬 Сигареты: <b>{real_cigs}</b>\n\n"
-        f"💬 Сообщений (всего): <b>{stats.get('messages', 0)}</b>\n"
-        f"🤖 С ботом: <b>{sum(c for _, c in get_daily_activity(target_uid))}</b>\n"
-        f"💭 В чате: <b>{sum(c for _, c in get_daily_chat_activity(target_uid))}</b>\n"
-        f"⚙️ Команд: <b>{stats.get('commands', 0)}</b>\n"
-        f"🖼 Картинок: <b>{stats.get('images', 0)}</b>\n"
-        f"🚬 Выкурено: <b>{stats.get('smokes', 0)}</b>\n"
-        f"🎰 Рулеток: <b>{roulette_plays}</b> (выжил в {survival_rate})"
+        f"🚬 Окурки: <b>{_fmt_num(cigs)}</b>\n"
+        f"💰 Рубли: <b>{_fmt_num(rubles)}₽</b>\n"
+        f"🚬 Сигареты: <b>{_fmt_num(real_cigs)}</b>\n\n"
+        f"💬 Сообщений всего: <b>{_fmt_num(total_msgs)}</b>\n"
+        f"   ├─ 🤖 С ботом: <b>{_fmt_num(bot_msgs)}</b>\n"
+        f"   └─ 💭 В чате: <b>{_fmt_num(chat_msgs)}</b>\n"
+        f"⚙️ Команд: <b>{_fmt_num(int(stats.get('commands', 0)))}</b>\n"
+        f"🖼 Картинок: <b>{_fmt_num(int(stats.get('images', 0)))}</b>\n"
+        f"🚬 Выкурено: <b>{_fmt_num(int(stats.get('smokes', 0)))}</b>\n"
+        f"🎰 Рулеток: <b>{_fmt_num(roulette_plays)}</b> (выжил в {survival_rate})"
         f"{first_msg_text}"
         f"{awards_text}"
     )
@@ -6089,12 +6256,12 @@ def cmd_stats(message: types.Message):
     increment_stat(uid, "commands")
     log_cmd(uid, username, "stats")
 
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or message.caption or "").split(maxsplit=1)
     target_uid = uid
     owner_label = "Твоя статистика"
 
     # Priority 1: reply to a message → show that user's stats
-    if message.reply_to_message and not message.reply_to_message.from_user.is_bot:
+    if message.reply_to_message and message.reply_to_message.from_user and not message.reply_to_message.from_user.is_bot:
         target_user = message.reply_to_message.from_user
         target_uid = str(target_user.id)
         owner_label = get_display_name(target_user)
@@ -6103,7 +6270,6 @@ def cmd_stats(message: types.Message):
             update_username(target_uid, target_user.username)
         log_cmd(uid, username, "stats", f"target={target_uid}")
     # Priority 2: /stats {username}
-        # Priority 2: /stats {username}
     elif len(parts) >= 2 and parts[1].strip():
         username_query = parts[1].strip().lstrip("@").lower()
         
@@ -6120,7 +6286,12 @@ def cmd_stats(message: types.Message):
         else:
             bot.reply_to(message, f"Пользователь @{username_query} не найден в базе бота.")
             return
-    stats_text = _build_stats_text(target_uid, owner_label)
+    try:
+        stats_text = _build_stats_text(target_uid, owner_label)
+    except Exception as e:
+        log_err("STATS", f"Failed to build stats for target={target_uid}: {e}")
+        bot.reply_to(message, "❌ Не удалось получить статистику. Попробуй позже.")
+        return
 
     wait_msg = bot.reply_to(message, "📊 Генерирую график общительности...")
 
@@ -6129,14 +6300,30 @@ def cmd_stats(message: types.Message):
         graph_bytes = generate_activity_graph(target_uid)
         try:
             bot.delete_message(message.chat.id, wait_msg.message_id)
-        except:
+        except Exception:
             pass
 
+        sent = False
         if graph_bytes:
-            bot.send_photo(message.chat.id, graph_bytes, caption=stats_text, reply_to_message_id=message.message_id)
-        else:
+            try:
+                bot.send_photo(
+                    message.chat.id, graph_bytes, caption=stats_text, parse_mode="HTML",
+                    reply_to_message_id=message.message_id,
+                    message_thread_id=get_message_thread_id(message),
+                )
+                sent = True
+            except Exception as e:
+                log_err("STATS", f"Failed to send stats photo: {e}")
+        if not sent:
             stats_text_no_graph = stats_text + "\n\n<i>График появится, как только пользователь начнёт проявлять активность в чате.</i>"
-            bot.reply_to(message, stats_text_no_graph)
+            try:
+                bot.reply_to(message, stats_text_no_graph, parse_mode="HTML")
+            except Exception as e:
+                log_err("STATS", f"Failed to send stats text: {e}")
+                try:
+                    bot.reply_to(message, re.sub(r"</?(b|i|u|s|code|pre)>", "", stats_text_no_graph))
+                except Exception:
+                    pass
 
     threading.Thread(target=_send_stats, daemon=True).start()
 
@@ -9903,14 +10090,10 @@ def _is_plain_message(message: types.Message) -> bool:
     content_types=["text", "photo", "document", "sticker"],
 )
 def handle_text(message: types.Message):
-    register_chat(message.chat.id)
+    # Регистрация/учёт сообщения уже выполнен в count_all_chat_messages,
+    # который срабатывает на ВСЕ входящие сообщения — здесь только контекст и логика ответов.
     uid = get_uid(message)
-    track_chat_member(message.chat.id, message.from_user)
-    increment_stat(uid, "messages")
-    set_first_message_if_null(uid)
-
-    if message.from_user.username:
-        update_username(uid, message.from_user.username)
+    set_reply_context(message)
 
     # RP first — must not depend on should_respond or random quote
     if try_rp_action(message):
@@ -9918,8 +10101,6 @@ def handle_text(message: types.Message):
 
     if should_respond(message):
         track_daily_activity(uid)
-    else:
-        track_daily_chat_activity(uid, message.chat.id)
 
     maybe_send_random_quote(message)
 
@@ -9991,7 +10172,7 @@ def handle_text(message: types.Message):
                 bot.delete_message(message.chat.id, wait_msg.message_id)
             except Exception:
                 pass
-            bot.reply_to(message, answer)
+            send_ai_answer(message, answer)
         except Exception as e:
             log_err("AI", f"Reply thread failed for user={uid}: {e}")
             try:
