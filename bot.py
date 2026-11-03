@@ -29,6 +29,12 @@ Uses PostgreSQL for data persistence (configure in config.json)
 #     (handle_text): increment_stat(uid, "messages") + track_daily_chat_activity.
 #   * Общий топ (/top_chat) снова строится по полю stats->>'messages' —
 #     количество сообщений пользователя именно в этом чате (люди из чата).
+# 03.11.2026 — Сохранение статистики между перезапусками:
+#   * Отменён сброс счётчиков при старте (reset_all_activity_counters_on_startup
+#     больше не вызывается) — вся накопленная статистика сохраняется в БД.
+#   * Сообщения, отправленные ДО текущего запуска бота, по-прежнему не учитываются
+#     (фильтр is_message_from_start по времени отправки в handle_text), но старые
+#     данные, посчитанные в предыдущие сессии, из БД не удаляются.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -858,13 +864,10 @@ except Exception as e:
     log_info("CONFIG", "Please configure your database in config.json before running the bot")
     # Continue anyway - bot will fail gracefully on DB operations
 
-# 03.11.2026: бот считает только сообщения, отправленные пока он работает —
-# при старте обнуляем все счётчики активности (daily_activity, daily_chat_activity
-# и stats->messages), чтобы старые данные не попадали в /stats и топы.
-try:
-    reset_all_activity_counters_on_startup()
-except Exception as e:
-    log_err("STARTUP", f"Failed to reset activity counters: {e}")
+# 03.11.2026: сообщения, отправленные ДО запуска бота, не учитываются
+# (фильтр по времени is_message_from_start в handle_text).
+# Счётчики в БД при этом НЕ сбрасываются — накопленная статистика сохраняется
+# между перезапусками (reset_all_activity_counters_on_startup намеренно не вызывается).
 
 # Initialize bot and AI client
 BOT_MSG_HISTORY: dict[int, deque] = {}
