@@ -18,9 +18,33 @@ Uses PostgreSQL for data persistence (configure in config.json)
 #     `код`, ```блоки кода```, ~~зачёркнутый~~ (Markdown от ИИ конвертируется в HTML).
 #   * /stats: корректно показывает статистику (в т.ч. чужую), сообщения разделены
 #     на «с ботом» и «в чате», график общительности строится по данным чата.
-#   * Бот считает ВООБЩЕ ВСЕ сообщения в чате (текст, фото, видео, стикеры,
-#     документы и т.д.) для всех пользователей, даже если бот на них не отвечает.
+#   * Учёт сообщений: текст, фото (+caption), документы-картинки и стикеры;
+#     команды в учёт сообщений не входят (идут в stats.commands).
 #   * Топ по общительности (/top_chat) включает только людей из текущего чата.
+# 03.11.2026 — Отказ от отдельного хендлера подчёта сообщений (бот лагал):
+#   * Удалён хендлер count_all_chat_messages, который срабатывал на каждое
+#     сообщение со всеми content_types (тяжелый путь: регистрация пользователя,
+#     чата, участника и запись в БД на каждый апдейт).
+# 03.11.2026 — Сохранение статистики между перезапусками:
+#   * Сброс счётчиков при старте УДАЛЁН — вся накопленная статистика хранится в БД
+#     и переживает перезапуски бота.
+# 03.11.2026 — Режимы работы ИИ (WORK_TYPE):
+#   * WORK_TYPE = 1 — прежняя логика через OpenRouter (VISION_MODEL / CHAT_MODEL).
+#   * WORK_TYPE = 2 — новый режим: весь ИИ (кроме генерации картинок) идёт через
+#     https://api.reformboss.com/v1/chat/completions, ключ из поля "TWO_API" в
+#     config.json, модели TWO_MODEL (ответы) и TWO_VISION (описание фото).
+# 03.11.2026 — Возврат к учёту ТОЛЬКО обращений к боту (бот перестал читать все сообщения):
+#   * Полностью вырезан весь механизм «фильтрации старых сообщений»: BOT_START_TS,
+#     is_message_from_start, skip_old_updates_before_start, mark_bot_start_time_in_db,
+#     таблица bot_state — больше ничего не проверяется и не логируется при старте.
+#   * Бот НЕ читает вообще все сообщения в чате: handle_text ничего не считает для
+#     сообщений, на которые он не отвечает. Считаются только ОБРАЩЕНИЯ К БОТУ
+#     (как раньше): ответ боту / упоминание / триггер-слово / личка -> daily_activity,
+#     команды -> stats.commands, обращения к ИИ в группе -> daily_chat_activity.
+#   * /top_chat показывает количество сообщений пользователя именно в этом чате
+#     (SUM по daily_chat_activity с фильтром по chat_id).
+#   * /stats: «Сообщений всего» = обращения к боту + сообщения в чатах (из таблиц
+#     активности), без stats.messages.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1129,52 +1153,12 @@ def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
     set_reply_context_from_call(call)
 
 
-ALL_MESSAGE_TYPES = [
-    "text", "audio", "document", "animation", "game", "photo", "sticker",
-    "video", "voice", "video_note", "contact", "location", "venue",
-    "poll", "dice", "story",
-]
-
-
-@bot.message_handler(content_types=ALL_MESSAGE_TYPES)
-def count_all_chat_messages(message: types.Message):
-    """Считает ВООБЩЕ ВСЕ сообщения в чате для статистики общительности.
-
-    Срабатывает на каждое входящее сообщение (текст, фото, видео, стикеры,
-    документы и т.д.), регистрирует автора как участника чата и увеличивает
-    счётчик сообщений этого пользователя в этом чате. Работает даже тогда,
-    когда бот на сообщение не отвечает. Команды (/start и т.п.) из счётчика
-    исключены — они считаются отдельно как команды.
-
-    ВАЖНО: сообщения, отправленные ДО запуска бота (старая история, которую
-    getUpdates может подтянуть при старте), НЕ учитываются вообще.
-    """
-    try:
-        if not is_message_from_start(message):
-            log_debug(
-                f"MSG_COUNT: skip OLD message id={message.message_id} "
-                f"(sent at {_msg_ts(message)}, bot started at {BOT_START_TS})"
-            )
-            return
-        user = message.from_user
-        if not user or user.is_bot:
-            return
-        uid = str(user.id)
-        get_or_create_user(uid)
-        if user.username:
-            update_username(uid, user.username)
-        set_first_message_if_null(uid)
-        register_chat(message.chat.id)
-        track_chat_member(message.chat.id, user)
-
-        raw_text = (message.text or "") + " " + (message.caption or "")
-        if raw_text.lstrip().startswith("/"):
-            return  # это команда — её считают командные хендлеры
-
-        increment_stat(uid, "messages")
-        track_daily_chat_activity(uid, message.chat.id)
-    except Exception as e:
-        log_err("MSG_COUNT", f"Failed to count chat message: {e}")
+# NOTE (03.11.2026): отдельный хендлер-счётчик сообщений на ВСЕ content_types
+# (count_all_chat_messages / ALL_MESSAGE_TYPES) удалён — он вызывал лаги,
+# т.к. на каждый входящий апдейт шёл тяжёлый путь в БД (get_or_create_user,
+# register_chat, track_chat_member, increment_stat с полным read-modify-write
+# JSONB). Бот НЕ читает вообще все сообщения: считаются только обращения к боту
+# (daily_activity в handle_text/ask_ai, stats.commands в командах).
 
 # Silero model
 silero_model = None
@@ -1806,8 +1790,11 @@ def get_daily_chat_activity(uid: str, chat_id: Optional[int] = None) -> list:
 def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None) -> list:
     """Get top users by total messages. table: 'bot' or 'chat'. Chat top is per chat_id.
 
-    Для топа по общительности в чате ('chat') в список попадают ТОЛЬКО пользователи,
-    которые пишут в этом чате (проверка по таблице chat_members).
+    table='bot'  — обращения к боту (daily_activity).
+    table='chat' — количество сообщений пользователя именно в этом чате
+                   (daily_chat_activity), в топ попадают только люди из текущего
+                   чата. Бот НЕ читает все сообщения подряд — эти данные считаются
+                   там, где бот и так обрабатывает обращение (см. ask_ai).
     """
     if table == "bot":
         results = db_execute(
@@ -1820,19 +1807,19 @@ def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None
     else:
         if chat_id is not None:
             query = (
-                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
-                "FROM daily_chat_activity da "
-                "JOIN users u ON u.id = da.user_id "
-                "WHERE da.chat_id = %s AND da.user_id IN "
-                "(SELECT user_id FROM chat_members WHERE chat_id = %s) "
-                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+                "SELECT dca.user_id, SUM(dca.message_count) AS total, u.username "
+                "FROM daily_chat_activity dca JOIN users u ON u.id = dca.user_id "
+                "WHERE dca.chat_id = %s "
+                "GROUP BY dca.user_id, u.username "
+                "ORDER BY total DESC LIMIT %s"
             )
-            params: tuple = (chat_id, chat_id, limit)
+            params: tuple = (chat_id, limit)
         else:
             query = (
-                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
-                "FROM daily_chat_activity da JOIN users u ON u.id = da.user_id "
-                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+                "SELECT dca.user_id, SUM(dca.message_count) AS total, u.username "
+                "FROM daily_chat_activity dca JOIN users u ON u.id = dca.user_id "
+                "GROUP BY dca.user_id, u.username "
+                "ORDER BY total DESC LIMIT %s"
             )
             params = (limit,)
         results = db_execute(query, params, fetch=True)
@@ -3627,7 +3614,8 @@ def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
         return None
 
 
-def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> str:
+def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None,
+           message: Optional[types.Message] = None) -> str:
     """Отправить сообщение ИИ.
 
     Если переданы байты изображения (фото прикреплено к тексту сообщения либо
@@ -3704,6 +3692,26 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
         ):
             content = current_user_content
         messages.append({"role": entry["role"], "content": content})
+
+    # ── Учёт обращения к боту (как раньше) ──
+    # Бот не читает все сообщения в чате — сюда доходят только реальные обращения
+    # (личка, ответ боту, упоминание, триггер-слово). Для групповых обращений
+    # дополнительно считаем сообщения пользователя в этом чате (daily_chat_activity)
+    # — именно это число показывает топ /top_chat ("сообщений зырису в этом чате").
+    try:
+        chat_id = getattr(_reply_ctx, "chat_id", None)
+        ctype = ""
+        if message is not None:
+            chat_id = message.chat.id
+            ctype = getattr(message.chat, "type", "") or ""
+        else:
+            # сообщение не передано — тип чата определяем по chat_id (личка < 0)
+            if chat_id is not None and chat_id > 0:
+                ctype = "group"
+        if chat_id is not None and ctype in ("group", "supergroup"):
+            track_daily_chat_activity(uid, chat_id)
+    except Exception as e:
+        log_err("STATS", f"Failed to track chat activity for user={uid}: {e}")
     
     try:
         log_ai(uid, user_message, "..." + (" [с фото]" if image_bytes else ""))
@@ -3757,52 +3765,6 @@ def roles_keyboard(uid: str) -> types.InlineKeyboardMarkup:
 
 def get_uid(message: types.Message) -> str:
     return str(message.from_user.id)
-
-
-# ── Учёт сообщений ТОЛЬКО с момента запуска бота ─────────────────────────────
-BOT_START_TS = int(time.time())  # unix-время старта процесса бота
-
-
-def _msg_ts(message: types.Message) -> int:
-    """Unix-время отправки сообщения (сравниваем ts с ts — часовой пояс не важен)."""
-    try:
-        d = getattr(message, "date", None)
-        if isinstance(d, datetime):
-            return int(d.timestamp())
-        return int(d or 0)
-    except Exception:
-        return 0
-
-
-def is_message_from_start(message: types.Message) -> bool:
-    """True, если сообщение отправлено НЕ РАНЬШЕ момента запуска бота.
-
-    При старте getUpdates может подтянуть старые (необработанные) сообщения из
-    истории — они не должны попадать ни в статистику, ни в ответы ИИ.
-    """
-    ts = _msg_ts(message)
-    # ts == 0 — нет данных о дате: считаем свежим, чтобы не ломать учёт
-    return ts == 0 or ts >= BOT_START_TS
-
-
-def reset_all_activity_counters_on_startup() -> None:
-    """При запуске обнуляет счётчики сообщений у всех известных пользователей.
-
-    Бот считает только те сообщения, что были отправлены пока он работает;
-    всё накопленное до этого момента (и в daily_activity, и в
-    daily_chat_activity, и в stats.messages) стирается одной операцией.
-    """
-    try:
-        db_execute("DELETE FROM daily_activity")
-        db_execute("DELETE FROM daily_chat_activity")
-        # stats — колонка JSONB; на случай старых схем (JSON) приведение безопасно
-        db_execute(
-            "UPDATE users SET stats = jsonb_set(stats::jsonb, '{messages}', '0')::jsonb "
-            "WHERE COALESCE((stats::jsonb->>'messages')::int, 0) > 0"
-        )
-        log_info("STATS", "Activity counters reset on startup (counting only from now).")
-    except Exception as e:
-        log_err("STATS", f"Failed to reset activity counters on startup: {e}")
 
 
 def is_group(message: types.Message) -> bool:
@@ -6381,9 +6343,11 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
 
     # Считаем реальные суммы из таблиц активности (а не только из stats),
     # чтобы цифры в /stats всегда совпадали с топами и графиками.
+    # bot_msgs  — обращения к боту (daily_activity)
+    # chat_msgs — сообщения пользователя в чатах (daily_chat_activity)
     bot_msgs = sum(c for _, c in get_daily_activity(target_uid))
     chat_msgs = sum(c for _, c in get_daily_chat_activity(target_uid))
-    total_msgs = max(int(stats.get("messages", 0) or 0), bot_msgs + chat_msgs)
+    total_msgs = bot_msgs + chat_msgs
 
     def _fmt_num(n: int) -> str:
         return f"{n:,}".replace(",", " ")
@@ -10259,15 +10223,6 @@ def _is_plain_message(message: types.Message) -> bool:
     content_types=["text", "photo", "document", "sticker"],
 )
 def handle_text(message: types.Message):
-    # Регистрация/учёт сообщения уже выполнен в count_all_chat_messages,
-    # который срабатывает на ВСЕ входящие сообщения — здесь только контекст и логика ответов.
-    # Старые сообщения (из истории, отправленные до запуска бота) полностью игнорируются.
-    if not is_message_from_start(message):
-        log_debug(
-            f"handle_text: skip OLD message id={message.message_id} "
-            f"(sent at {_msg_ts(message)}, bot started at {BOT_START_TS})"
-        )
-        return
     uid = get_uid(message)
     set_reply_context(message)
 
@@ -10275,8 +10230,16 @@ def handle_text(message: types.Message):
     if try_rp_action(message):
         return
 
+    # ── Учёт обращений к боту (как раньше) ──
+    # Бот НЕ читает вообще все сообщения в чате — это вызывало лаги.
+    # Считаются только обращения к боту: ответ боту, упоминание, триггерные
+    # слова или личка (should_respond). Запись идёт в daily_activity
+    # ("Сообщений всего" в /stats и топ /top_bot).
     if should_respond(message):
-        track_daily_activity(uid)
+        try:
+            track_daily_activity(uid)
+        except Exception as e:
+            log_err("STATS", f"Failed to track bot activity: {e}")
 
     maybe_send_random_quote(message)
 
@@ -10341,7 +10304,7 @@ def handle_text(message: types.Message):
     def _reply():
         try:
             set_reply_context(message)
-            answer = ask_ai(uid, user_text, ai_image_bytes)
+            answer = ask_ai(uid, user_text, ai_image_bytes, message=message)
             if not answer or not str(answer).strip():
                 answer = "Не получилось сформировать ответ. Попробуй ещё раз."
             try:
