@@ -6,18 +6,19 @@ Uses PostgreSQL for data persistence (configure in config.json)
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN CONFIGURATION - Edit these values
 # ═══════════════════════════════════════════════════════════════════════════════
-
+# Перечислите здесь ID тех, кого нужно полностью игнорировать
+THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ] 
 BOT_TOKEN = ""  # Set via config.json or BOT_TOKEN env var
-PROXY_URL = "http://31.59.20.176:6754"  # Set to None to disable proxy
+PROXY_URL = "45.38.107.97:6014"  # Set to None to disable proxy
 AI_DELAY = 2  # Seconds to wait before AI response
 TRASH_COOLDOWN = 40 * 60  # 40 minutes in seconds
 TRIGGER_WORDS = {"зырис", "ziris", "чмо"}
 DEFAULT_SPEAKER = "aidar"
 SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "random"]
 ROULETTE_DEATH_CHANCE = 0.20  # 20% chance to die
-REACTION_CHANCE = 0.30  # 30% chance to react
 QUOTE_CHANCE = 0.05  # 5% chance to send random quote
 QUOTE_COOLDOWN = 3600  # max 1 quote per chat per hour
+REACT_CHANCE = 0.10 # 10% chance
 MESSAGE_MAX_AGE = 45  # ignore messages older than this (seconds)
 
 # Economy config
@@ -78,8 +79,11 @@ CRYPTO_CURRENCY_LABELS = {
     "cigarettes": ("🚬", "сигарета"),
     "rubles": ("💰", "₽"),
 }
+
+
 CRYPTO_PENDING: dict[str, dict] = {}
 BANK_PENDING: dict[str, dict] = {}
+YTD_CACHE: dict[str, str] = {}  # video_id -> url cache for callback data
 _last_quote_sent: dict[int, float] = {}
 AI_HISTORY_LIMIT = 20
 
@@ -93,7 +97,7 @@ DB_PASSWORD = ")nwM4QB}?JG$d3+"
 # ═══════════════════════════════════════════════════════════════════════════════
 # Imports
 # ═══════════════════════════════════════════════════════════════════════════════
-
+from telebot.handler_backends import CancelUpdate
 import asyncio
 import io
 import json
@@ -124,6 +128,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+
+import yt_dlp
+import g4f
+from g4f.client import Client
+g4f_client = Client()
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Logging
@@ -301,6 +312,7 @@ def create_tables():
         stats JSONB DEFAULT '{"messages": 0, "commands": 0, "images": 0, "smokes": 0, "roulette_plays": 0, "roulette_deaths": 0}',
         awards JSONB DEFAULT '[]',
         first_message_at TIMESTAMP DEFAULT NULL,
+        hate_fun BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -311,6 +323,24 @@ def create_tables():
     ALTER TABLE users ADD COLUMN IF NOT EXISTS awards JSONB DEFAULT '[]';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMP DEFAULT NULL;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS crypto_balance REAL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
+
+    -- Items table for user inventory
+    CREATE TABLE IF NOT EXISTS user_items (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        item_name TEXT NOT NULL,
+        item_description TEXT,
+        category TEXT NOT NULL,
+        price INTEGER DEFAULT 0,
+        currency TEXT DEFAULT 'rubles',
+        given_by_creator BOOLEAN DEFAULT false,
+        obtained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_user_items_user_id ON user_items(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_items_category ON user_items(category);
 
     -- Clans table
     CREATE TABLE IF NOT EXISTS clans (
@@ -327,6 +357,7 @@ def create_tables():
         code TEXT NOT NULL UNIQUE,
         reward_type TEXT NOT NULL,
         reward_amount INTEGER NOT NULL,
+        reward_item_data JSONB DEFAULT NULL,
         max_uses INTEGER NOT NULL,
         uses INTEGER DEFAULT 0,
         created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -462,6 +493,7 @@ def create_tables():
         text TEXT NOT NULL,
         author TEXT NOT NULL,
         photo_file_id TEXT DEFAULT NULL,
+        animation_file_id TEXT DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -469,6 +501,7 @@ def create_tables():
 
     -- Add photo_file_id column to existing quotes tables safely
     ALTER TABLE quotes ADD COLUMN IF NOT EXISTS photo_file_id TEXT DEFAULT NULL;
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS animation_file_id TEXT DEFAULT NULL;
 
     -- Reminders table
     CREATE TABLE IF NOT EXISTS reminders (
@@ -494,19 +527,6 @@ def create_tables():
     );
 
     CREATE INDEX IF NOT EXISTS idx_chat_history_user_id ON chat_history(user_id);
-
-    -- Dialog history table (for /history command - saved conversations)
-    CREATE TABLE IF NOT EXISTS dialog_history (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        dialog_name TEXT NOT NULL,
-        dialog_data JSONB NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_dialog_history_user_id ON dialog_history(user_id);
-    CREATE INDEX IF NOT EXISTS idx_dialog_history_created_at ON dialog_history(created_at DESC);
 
     -- Chat members table (for /ship and member tracking)
     CREATE TABLE IF NOT EXISTS chat_members (
@@ -578,6 +598,28 @@ def create_tables():
         infect_count INTEGER DEFAULT 0,
         UNIQUE(owner_id, stat_date)
     );
+
+    -- Dialog history sessions table
+    CREATE TABLE IF NOT EXISTS dialog_sessions (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        session_name TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dialog_sessions_user_id ON dialog_sessions(user_id);
+
+    -- Dialog messages table
+    CREATE TABLE IF NOT EXISTS dialog_messages (
+        id SERIAL PRIMARY KEY,
+        session_id INTEGER NOT NULL REFERENCES dialog_sessions(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dialog_messages_session_id ON dialog_messages(session_id);
     """
     try:
         conn = get_db_connection()
@@ -821,24 +863,34 @@ def _get_openrouter_client():
         log_err("AI", "OpenRouter API key not found in config.json")
         return None
     return OpenAI(
-        base_url="http://localhost:1234/v1",
+        base_url="https://api.orcarouter.ai/v1/",
         api_key=api_key
     )
 
 openrouter_client = _get_openrouter_client()
 
+@bot.message_handler(func=lambda m: m.from_user and m.from_user.id in THIS_MEN_HATE_FUN, content_types=['text', 'photo', 'voice', 'document', 'animation'])
+def blacklisted_user_filter(message: types.Message):
+    # Бот видит сообщение от забаненного, логирует его и ничего не делает в ответ
+    log_info("BLACK_LIST", f"Попытка использования бота забаненным ID: {message.from_user.id}")
+    return # Никаких ответов и вызовов ask_ai
+
 
 @bot.middleware_handler(update_types=["message"])
 def _reply_context_message(_bot_instance, message: types.Message):
+    if message.from_user and message.from_user.id in THIS_MEN_HATE_FUN:
+        log_info("BAN", f"Игнорирую сообщение от забаненного ID: {message.from_user.id}")
+        return CancelUpdate() # 🔥 ВОТ ТЕПЕРЬ выполнение для этого юзера полностью прекращается!
+        
     set_reply_context(message)
+
+
+
 
 
 @bot.middleware_handler(update_types=["callback_query"])
 def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
     set_reply_context_from_call(call)
-
-# Maximum number of saved dialogs per user
-MAX_DIALOG_HISTORY = 20
 
 # Silero model
 silero_model = None
@@ -911,9 +963,11 @@ def init_silero():
 def get_or_create_user(uid: str) -> dict:
     """Get user from DB, create if not exists."""
     uid = str(uid)
+    
+    # ДОБАВИЛИ hate_fun В КОНЕЦ ЗАПРОСА (теперь это 14-е поле, индекс 13)
     result = db_execute(
         "SELECT id, username, role, cigarettes, rubles, real_cigarettes, "
-        "clan_id, dead, last_trash, stats, awards, first_message_at, crypto_balance "
+        "clan_id, dead, last_trash, stats, awards, first_message_at, crypto_balance, hate_fun "
         "FROM users WHERE id = %s",
         (uid,), fetch=True, fetch_one=True
     )
@@ -935,18 +989,20 @@ def get_or_create_user(uid: str) -> dict:
             "awards": awards_val if isinstance(awards_val, list) else json.loads(awards_val) if awards_val else [],
             "first_message_at": result[11],
             "crypto_balance": float(result[12] or 0),
+            "hate_fun": bool(result[13]), # Принудительно приводим к bool для стабильности
         }
 
     # Create new user
     default_stats = {"messages": 0, "commands": 0, "images": 0, "smokes": 0, "roulette_plays": 0, "roulette_deaths": 0}
     db_execute(
-        "INSERT INTO users (id, username, role, cigarettes, rubles, real_cigarettes, clan_id, dead, last_trash, stats, awards, first_message_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (uid, "", "default", 0, 0, 0, None, False, 0, json.dumps(default_stats), "[]", None)
+        "INSERT INTO users (id, username, role, cigarettes, rubles, real_cigarettes, clan_id, dead, last_trash, stats, awards, first_message_at, hate_fun) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (uid, "", "default", 0, 0, 0, None, False, 0, json.dumps(default_stats), "[]", None, False)
     )
+    # ДОБАВИЛИ дефолтные crypto_balance и hate_fun в возврат, чтобы у новых юзеров не было KeyError в коде
     return {"id": uid, "username": "", "role": "default", "cigarettes": 0, "rubles": 0,
             "real_cigarettes": 0, "clan_id": None, "dead": False, "last_trash": 0,
-            "stats": default_stats, "awards": [], "first_message_at": None, "crypto_balance": 0.0}
+            "stats": default_stats, "awards": [], "first_message_at": None, "crypto_balance": 0.0, "hate_fun": False}
 
 def update_user(uid: str, **kwargs) -> None:
     """Update user fields."""
@@ -1022,6 +1078,10 @@ def set_user_dead(uid: str, dead: bool) -> None:
 def update_username(uid: str, username: str) -> None:
     update_user(uid, username=username)
 
+def does_hate_fun(uid: str):
+	user = get_or_create_user(uid)
+	return user.get("hate_fun", False)
+
 def can_collect_trash(uid: str) -> tuple[bool, int]:
     user = get_or_create_user(uid)
     last_trash = user.get("last_trash", 0)
@@ -1052,6 +1112,98 @@ def add_award(uid: str, award_name: str) -> None:
     awards = get_awards(uid)
     awards.append({"name": award_name, "date": datetime.now().strftime("%d.%m.%Y")})
     update_user(uid, awards=json.dumps(awards))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Item System Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ITEMS_DIR = os.path.join(BASE_DIR, "items")
+
+def load_categories() -> dict:
+    """Load categories from items/categories.json"""
+    path = os.path.join(ITEMS_DIR, "categories.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def load_category_items(category_key: str) -> list:
+    """Load items for a specific category from items/{category}.json"""
+    path = os.path.join(ITEMS_DIR, f"{category_key}.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def give_item_to_user(uid: str, item_id: str, item_name: str, item_desc: str, 
+                      category: str, price: int, currency: str, by_creator: bool = False) -> bool:
+    """Give an item to a user. Returns True on success."""
+    try:
+        db_execute(
+            "INSERT INTO user_items (user_id, item_id, item_name, item_description, category, price, currency, given_by_creator) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (str(uid), item_id, item_name, item_desc, category, price, currency, by_creator)
+        )
+        return True
+    except Exception as e:
+        log_err("ITEMS", f"Error giving item to user: {e}")
+        return False
+
+def get_user_inventory(uid: str) -> list:
+    """Get all items owned by a user."""
+    results = db_execute(
+        "SELECT id, item_id, item_name, item_description, category, price, currency, given_by_creator, obtained_at "
+        "FROM user_items WHERE user_id = %s ORDER BY obtained_at DESC",
+        (str(uid),), fetch=True
+    )
+    if not results:
+        return []
+    return [
+        {
+            "id": r[0],
+            "item_id": r[1],
+            "name": r[2],
+            "description": r[3],
+            "category": r[4],
+            "price": r[5],
+            "currency": r[6],
+            "given_by_creator": r[7],
+            "obtained_at": r[8]
+        }
+        for r in results
+    ]
+
+def delete_user_item(item_db_id: int, uid: str) -> bool:
+    """Delete an item from user inventory. Returns True if deleted."""
+    try:
+        result = db_execute(
+            "DELETE FROM user_items WHERE id = %s AND user_id = %s",
+            (item_db_id, str(uid))
+        )
+        return True
+    except Exception as e:
+        log_err("ITEMS", f"Error deleting item: {e}")
+        return False
+
+def get_item_by_db_id(item_db_id: int, uid: str) -> Optional[dict]:
+    """Get a specific item from user inventory."""
+    result = db_execute(
+        "SELECT id, item_id, item_name, item_description, category, price, currency, given_by_creator "
+        "FROM user_items WHERE id = %s AND user_id = %s",
+        (item_db_id, str(uid)), fetch=True, fetch_one=True
+    )
+    if not result:
+        return None
+    return {
+        "db_id": result[0],
+        "item_id": result[1],
+        "name": result[2],
+        "description": result[3],
+        "category": result[4],
+        "price": result[5],
+        "currency": result[6],
+        "given_by_creator": result[7]
+    }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Pathogen / Virus Helpers
@@ -2820,6 +2972,21 @@ def activate_promo_code(code: str, uid: str) -> Optional[str]:
         add_cigarettes(uid, reward_amount)
     elif reward_type == "real_cigarettes":
         add_real_cigarettes(uid, reward_amount)
+    elif reward_type == "item":
+        # Give item from promo - reward_amount contains JSON string with item data
+        import json as json_mod
+        try:
+            item_data = json_mod.loads(reward_amount) if isinstance(reward_amount, str) else reward_amount
+            item_id = item_data.get("item_id", f"promo_{promo['id']}")
+            item_name = item_data.get("name", "Промо предмет")
+            item_desc = item_data.get("description", "")
+            category = item_data.get("category", "promo")
+            price = item_data.get("price", 0)
+            currency = item_data.get("currency", "rubles")
+            give_item_to_user(uid, item_id, item_name, item_desc, category, price, currency, by_creator=False)
+        except Exception as e:
+            log_err("PROMO", f"Error giving item from promo: {e}")
+            return None
     else:
         return None
 
@@ -2851,97 +3018,93 @@ def clear_history(uid: str) -> None:
     """Clear user's in-memory AI chat history."""
     ai_chat_history.pop(str(uid), None)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Dialog History Helpers (for /history command - saved conversations)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def save_dialog_to_db(uid: str, dialog_name: str, dialog_data: list) -> int:
-    """Save a dialog to the database. Returns the dialog ID."""
+def save_dialog_session(uid: str, session_name: str, messages: list) -> int:
+    """Save a dialog session to the database. Returns session_id."""
     uid = str(uid)
-    import json
-    
-    # Delete oldest dialogs if we have MAX_DIALOG_HISTORY already
-    db_execute(
-        """
-        DELETE FROM dialog_history 
-        WHERE user_id = %s 
-        AND id NOT IN (
-            SELECT id FROM dialog_history 
-            WHERE user_id = %s 
-            ORDER BY created_at DESC 
-            LIMIT %s
-        )
-        """,
-        (uid, uid, MAX_DIALOG_HISTORY - 1)
-    )
-    
-    # Insert new dialog
+    # Create session
     result = db_execute(
-        """
-        INSERT INTO dialog_history (user_id, dialog_name, dialog_data, created_at, updated_at)
-        VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        RETURNING id
-        """,
-        (uid, dialog_name, json.dumps(dialog_data, ensure_ascii=False)),
+        "INSERT INTO dialog_sessions (user_id, session_name) VALUES (%s, %s) RETURNING id",
+        (uid, session_name),
         fetch=True,
         fetch_one=True
     )
-    return result[0] if result else None
+    if not result:
+        return -1
+    session_id = result[0]
+    
+    # Save messages
+    for msg in messages:
+        db_execute(
+            "INSERT INTO dialog_messages (session_id, role, content) VALUES (%s, %s, %s)",
+            (session_id, msg["role"], msg["content"])
+        )
+    
+    return session_id
 
 def get_user_dialogs(uid: str, limit: int = 20) -> list:
-    """Get user's saved dialogs from database."""
+    """Get user's last N dialog sessions."""
     uid = str(uid)
     results = db_execute(
-        """
-        SELECT id, dialog_name, dialog_data, created_at 
-        FROM dialog_history 
-        WHERE user_id = %s 
-        ORDER BY created_at DESC 
-        LIMIT %s
-        """,
+        "SELECT id, session_name, created_at FROM dialog_sessions WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
         (uid, limit),
         fetch=True
     )
-    return results if results else []
+    return [(r[0], r[1], r[2]) for r in results] if results else []
 
-def get_dialog_by_id(dialog_id: int) -> tuple:
-    """Get a specific dialog by ID."""
+def get_dialog_messages(session_id: int) -> list:
+    """Get all messages from a dialog session."""
+    results = db_execute(
+        "SELECT role, content FROM dialog_messages WHERE session_id = %s ORDER BY created_at ASC",
+        (session_id,),
+        fetch=True
+    )
+    return [{"role": r[0], "content": r[1]} for r in results] if results else []
+
+def delete_dialog_session(session_id: int, uid: str) -> bool:
+    """Delete a dialog session (only if it belongs to the user)."""
+    uid = str(uid)
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM dialog_sessions WHERE id = %s AND user_id = %s",
+                (session_id, uid)
+            )
+            deleted_count = cur.rowcount
+            conn.commit()
+            return deleted_count > 0
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        log_err("DB", f"Delete dialog error: {e}")
+        return False
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def load_dialog_to_memory(session_id: int, uid: str) -> bool:
+    """Load a dialog session into memory and clear current history."""
+    uid = str(uid)
+    # Verify ownership
     result = db_execute(
-        """
-        SELECT id, user_id, dialog_name, dialog_data, created_at 
-        FROM dialog_history 
-        WHERE id = %s
-        """,
-        (dialog_id,),
+        "SELECT id FROM dialog_sessions WHERE id = %s AND user_id = %s",
+        (session_id, uid),
         fetch=True,
         fetch_one=True
     )
-    return result if result else None
-
-def delete_dialog_from_db(dialog_id: int, uid: str) -> bool:
-    """Delete a dialog from database. Returns True if deleted."""
-    uid = str(uid)
-    result = db_execute(
-        """
-        DELETE FROM dialog_history 
-        WHERE id = %s AND user_id = %s
-        """,
-        (dialog_id, uid)
-    )
-    return result is not None
-
-def update_dialog_timestamp(dialog_id: int) -> None:
-    """Update the updated_at timestamp for a dialog."""
-    db_execute(
-        """
-        UPDATE dialog_history 
-        SET updated_at = CURRENT_TIMESTAMP 
-        WHERE id = %s
-        """,
-        (dialog_id,)
-    )
-
-
+    if not result:
+        return False
+    
+    # Clear current memory
+    clear_history(uid)
+    
+    # Load messages into memory
+    messages = get_dialog_messages(session_id)
+    for msg in messages:
+        append_history(uid, msg["role"], msg["content"])
+    
+    return True
 
 def get_leaderboard() -> list:
     """Get top 10 users by cigarettes."""
@@ -2995,34 +3158,34 @@ def get_all_chats() -> list[int]:
     results = db_execute("SELECT id FROM chats", fetch=True)
     return [r[0] for r in results] if results else []
 
-def add_quote(chat_id: int, text: str, author: str, photo_file_id: str = None) -> int:
+def add_quote(chat_id: int, text: str, author: str, photo_file_id: str = None, animation_file_id: str = None) -> int:
     results = db_execute("SELECT COUNT(*) FROM quotes WHERE chat_id = %s", (chat_id,), fetch=True)
     count = results[0][0] if results else 0
 
     db_execute(
-        "INSERT INTO quotes (chat_id, text, author, photo_file_id) VALUES (%s, %s, %s, %s)",
-        (chat_id, text, author, photo_file_id)
+        "INSERT INTO quotes (chat_id, text, author, photo_file_id, animation_file_id) VALUES (%s, %s, %s, %s, %s)",
+        (chat_id, text, author, photo_file_id, animation_file_id)
     )
     return count + 1
 
 def get_random_quote(chat_id: int) -> Optional[dict]:
     results = db_execute(
-        "SELECT text, author, photo_file_id FROM quotes WHERE chat_id = %s ORDER BY RANDOM() LIMIT 1",
+        "SELECT text, author, photo_file_id, animation_file_id FROM quotes WHERE chat_id = %s ORDER BY RANDOM() LIMIT 1",
         (chat_id,),
         fetch=True
     )
     if results:
-        return {"text": results[0][0], "author": results[0][1], "photo_file_id": results[0][2]}
+        return {"text": results[0][0], "author": results[0][1], "photo_file_id": results[0][2], "animation_file_id": results[0][3]}
     return None
 
 def get_quotes_list(chat_id: int, limit: int = 20) -> list:
     results = db_execute(
-        "SELECT id, text, author FROM quotes WHERE chat_id = %s ORDER BY id DESC LIMIT %s",
+        "SELECT id, text, author, photo_file_id, animation_file_id FROM quotes WHERE chat_id = %s ORDER BY id DESC LIMIT %s",
         (chat_id, limit),
         fetch=True
     )
     if results:
-        return [{"id": r[0], "text": r[1], "author": r[2]} for r in results]
+        return [{"id": r[0], "text": r[1], "author": r[2], "photo_file_id": r[3], "animation_file_id": r[4]} for r in results]
     return []
 
 def delete_quote_by_id(quote_id: int, chat_id: int) -> bool:
@@ -3102,7 +3265,15 @@ def get_system_prompt(role_key: str) -> str:
 
 def ask_ai(uid: str, user_message: str) -> str:
     role_key = get_user_role(uid)
-    system_prompt = get_system_prompt(role_key)
+    base_system_prompt = get_system_prompt(role_key)
+    
+    # Автоматически берем данные пользователя из БД по его uid
+    user_data = get_or_create_user(uid)
+    username = user_data.get("username") or f"id{uid}"
+    
+    # Тупо склеиваем информацию о собеседнике с системным промптом перед генерацией
+    system_prompt = f"Текущий собеседник (username): {username}\n\n{base_system_prompt}"
+    
     history = append_history(uid, "user", user_message)
     messages = [{"role": "system", "content": system_prompt}] + history
     
@@ -3115,7 +3286,7 @@ def ask_ai(uid: str, user_message: str) -> str:
             return "AI сервис временно недоступен. Попробуйте позже."
         
         response = openrouter_client.chat.completions.create(
-            model="gemma3-1b_heretic",  # Указываем конкретную бесплатную модель
+            model="tencent/hy3-free",  # Указываем конкретную бесплатную модель
             messages=messages
         )
         
@@ -3136,8 +3307,8 @@ def ask_ai(uid: str, user_message: str) -> str:
 def generate_image(uid: str, prompt: str) -> Optional[str]:
     try:
         log_gen(uid, "IMAGE", prompt, False, "generating...")
-        response = ai_client.images.generate(
-            model="flux-dev",
+        response = g4f_client.images.generate(
+            model="flux",
             prompt=prompt,
             response_format="url",
         )
@@ -3148,6 +3319,7 @@ def generate_image(uid: str, prompt: str) -> Optional[str]:
         log_err("GEN_IMAGE", f"Error for user={uid}: {e}")
         log_gen(uid, "IMAGE", prompt, False)
         return None
+
 
 def roles_keyboard(uid: str) -> types.InlineKeyboardMarkup:
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -3190,6 +3362,10 @@ def is_group_admin(message: types.Message) -> bool:
 def can_award(message: types.Message) -> bool:
     """Check if the user can award others — must be a group admin or bot admin."""
     return is_group_admin(message)
+
+def is_bot_creator(message: types.Message) -> bool:
+    """Check if the user is the bot creator (from ADMIN_USERNAMES)."""
+    return is_admin(message)
 
 def get_display_name(user) -> str:
     """Get a display name from a Telegram user object."""
@@ -3432,6 +3608,7 @@ COMMAND_LIST = [
     "/leaderboard - топ по окуркам",
     "/roulette - русская рулетка",
     "/revive - воскреснуть",
+    "/ihatefun - отключить реакции от бота",
     "/ping - проверить пинг бота",
     "/clear - очистить память ИИ",
     "/reverse - отзеркалить фото",
@@ -3459,6 +3636,7 @@ COMMAND_LIST = [
     "/wallet - кошелёк COK (график, перевод)",
     "/bank - Центробанк (кредит, вклад, комиссии)",
     "/quote - сохранить цитату",
+    "/citatnik - просмотр всех цитат чата (админы могут удалять)",
     "/ship - шипперим двух рандомных людей из чата",
     "/shhh - нашептать секретное сообщение",
     "/mines - игра Мины (ставка на окурки/рубли/сигареты)",
@@ -3562,7 +3740,7 @@ def process_image(image_bytes: bytes, mode: str) -> Optional[bytes]:
         elif mode == "jpeg":
             img = img.convert("RGB")
             output = io.BytesIO()
-            img.save(output, format="JPEG", quality=10)
+            img.save(output, format="JPEG", quality=1)
             return output.getvalue()
         elif mode == "invert":
             img = ImageOps.invert(img.convert("RGB"))
@@ -3695,7 +3873,11 @@ def maybe_send_random_quote(message: types.Message) -> bool:
     if not quote:
         return False
     try:
-        if quote.get('photo_file_id'):
+        if quote.get('animation_file_id'):
+            caption = f"💬 <i>{quote['text']}</i>\n\n— {quote['author']}" if quote['text'] and quote['text'] != "🎬" else f"💬 — {quote['author']}"
+            bot.send_animation(chat_id, quote['animation_file_id'], caption=caption,
+                               reply_to_message_id=message.message_id)
+        elif quote.get('photo_file_id'):
             caption = f"💬 <i>{quote['text']}</i>\n\n— {quote['author']}" if quote['text'] and quote['text'] != "📷" else f"💬 — {quote['author']}"
             bot.send_photo(chat_id, quote['photo_file_id'], caption=caption,
                            reply_to_message_id=message.message_id)
@@ -3824,6 +4006,7 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
         ("enemy_list", "Список врагов"),
         ("gen", "Генерация изображения"),
         ("invert", "Инвертировать цвета"),
+        ("ihatefun", "Отключить реакции от бота"),
         ("join_clan", "Вступить в клан"),
         ("jpeg", "Ухудшить качество"),
         ("lab", "Лаборатория вируса"),
@@ -3926,6 +4109,7 @@ def get_start_text(page: int = 0, name: str = "друг") -> str:
         ("enemy_list", "Список врагов"),
         ("gen", "Генерация изображения"),
         ("invert", "Инвертировать цвета"),
+        ("ihatefun", "Отключить реакции для бота"),
         ("join_clan", "Вступить в клан"),
         ("jpeg", "Ухудшить качество"),
         ("lab", "Лаборатория вируса"),
@@ -3971,6 +4155,9 @@ def get_start_text(page: int = 0, name: str = "друг") -> str:
         ("vsem", "Рассылка всем"),
         ("wallet", "Кошелёк криптовалюты"),
         ("warn", "Предупредить"),
+        ("items", "Ваш инвентарь"),
+        ("shop", "ВМагазин вещей"),
+        ("to_award_item", "Наградить вещью"),
         ("weather", "Узнать погоду")
     ]
     
@@ -4079,13 +4266,11 @@ def cmd_about(message: types.Message):
     roles = get_all_roles(uid)
     current_role = roles.get(role_key, {}).get("name", "Обычный ассистент")
     uptime = uptime_str()
-    cigs = get_cigarettes(uid)
-    rubles = get_rubles(uid)
-    real_cigs = get_real_cigarettes(uid)
     is_dead = is_user_dead(uid)
     status = "💀 Мёртв" if is_dead else "✅ Жив"
 
-    bot.reply_to(message,
+    # Сформированный текст БЕЗ упоминания баланса окурков, рублей и сигарет
+    about_text = (
         "ℹ️ <b>О боте</b>\n\n"
         "Я тг бог работающий на <b>GPT.</b> "
         "Генерация изображений через <b>Flux</b>.\n"
@@ -4093,10 +4278,29 @@ def cmd_about(message: types.Message):
         "Данные хранятся в <b>PostgreSQL</b>.\n\n"
         f"<b>Время работы:</b> {uptime}\n"
         f"<b>Твоя текущая роль:</b> {current_role}\n"
-        f"<b>Окурки:</b> {cigs} | <b>Рубли:</b> {rubles}₽ | <b>Сигареты:</b> {real_cigs}\n"
         f"<b>Статус:</b> {status}\n\n"
-        "<b>Меня создал @weird_maan</b>"
+        "<b>Меня создал @weird_maan при поддержке 🜛 -⁝‖⁝- 𝖶ɪɴ͠ᴅ𝖲ᴛᴏ͠ʀᴍ ⦋⸳🌑⸳⦌</b>"
     )
+
+    # Путь к файлу анимации в корневой папке бота
+    gif_path = os.path.join(BASE_DIR, "about_logo.gif")
+    
+    if os.path.exists(gif_path):
+        try:
+            with open(gif_path, "rb") as gif:
+                bot.send_animation(
+                    chat_id=message.chat.id,
+                    animation=gif,
+                    caption=about_text,
+                    parse_mode="HTML",
+                    reply_to_message_id=message.message_id
+                )
+            return
+        except Exception as e:
+            log_err("ABOUT", f"Ошибка отправки локальной гифки: {e}")
+
+    # Резервный текстовый ответ, если гифка 'about_logo.gif' отсутствует в папке
+    bot.reply_to(message, about_text, parse_mode="HTML")
 
 
 @bot.message_handler(commands=["roles"])
@@ -4175,6 +4379,52 @@ def callback_delete_role_menu(call: types.CallbackQuery):
         reply_markup=markup
     )
 
+@bot.message_handler(commands=["yatb"])
+def cmd_yatb(message: types.Message):
+    uid = get_uid(message)
+    increment_stat(uid, "commands")
+
+    # Извлекаем текст из команды или из реплая
+    parts = message.text.split(maxsplit=1)
+    source_text = parts[1].strip() if len(parts) >= 2 and parts[1].strip() else ""
+    if not source_text and message.reply_to_message:
+        source_text = message.reply_to_message.text or message.reply_to_message.caption
+    
+    if not source_text:
+        bot.reply_to(message, "📜 Напиши текст после команды или ответь ей на сообщение.")
+        return
+
+    log_cmd(uid, message.from_user.username or "unknown", "yatb", source_text[:30])
+    wait_msg = bot.reply_to(message, "⏳ Перевожу слог...")
+
+    def _slavic_reply():
+        try:
+            set_reply_context(message)
+            if openrouter_client is None:
+                bot.edit_message_text("❌ Ошибка: OpenRouter не настроен.", message.chat.id, wait_msg.message_id)
+                return
+
+            # Минимальный точечный промпт
+            prompt = "Переделай текст на старославянский (древнерусский) лад, используя 'азь есмь', 'ъ', 'ь', 'вѣ' и былинные обороты. Если есть мат — сделай его сочным древним ругательством. Выдай только перевод, без пояснений."
+
+            res = openrouter_client.chat.completions.create(
+                model="tencent/hy3-free",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": source_text}
+                ]
+            )
+            ans = res.choices[0].message.content.strip()
+            bot.delete_message(message.chat.id, wait_msg.message_id)
+            bot.reply_to(message, ans if ans else "Не удалось получить ответ.")
+        except Exception as e:
+            log_err("YATB", str(e))
+            try:
+                bot.delete_message(message.chat.id, wait_msg.message_id)
+            except Exception:
+                pass
+
+    threading.Thread(target=_slavic_reply, daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delrole:"))
 def callback_delete_role(call: types.CallbackQuery):
@@ -4269,13 +4519,63 @@ def cmd_gen(message: types.Message):
 
     def _gen():
         set_reply_context(message)
-        url = generate_image(uid, prompt)
-        bot.delete_message(message.chat.id, wait_msg.message_id)
-        if url:
-            increment_stat(uid, "images")
-            bot.send_photo(message.chat.id, url, caption=f"Держи: <i>{prompt}</i>", reply_to_message_id=message.message_id)
-        else:
-            bot.reply_to(message, "Не удалось сгенерировать изображение.")
+        # Вызываем старый метод (он вернет URL, а g4f попутно сохранит файл на диск)
+        url_result = generate_image(uid, prompt) 
+        
+        try:
+            bot.delete_message(message.chat.id, wait_msg.message_id)
+        except Exception:
+            pass
+            
+        # Папка, куда g4f автоматически кидает картинки
+        folder_path = os.path.join(BASE_DIR, "generated_images")
+        
+        if os.path.exists(folder_path):
+            # Собираем файлы из папки генераций
+            files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)]
+            files = [f for f in files if os.path.isfile(f)]
+            
+            if files:
+                # Берем самую последнюю сохраненную картинку
+                latest_file = max(files, key=os.path.getmtime)
+                
+                try:
+                    increment_stat(uid, "images")
+                    # Отправляем файл напрямую с диска
+                    with open(latest_file, "rb") as photo:
+                        bot.send_photo(
+                            message.chat.id, 
+                            photo, 
+                            caption=f"Держи: <i>{prompt}</i>", 
+                            reply_to_message_id=message.message_id
+                        )
+                except Exception as e:
+                    log_err("SEND_PHOTO", f"Failed to send local file: {e}")
+                    bot.reply_to(message, "Ошибка при отправке сгенерированного файла.")
+                finally:
+                    # Чистим за собой диск
+                    try:
+                        os.remove(latest_file)
+                        log_info("GEN_IMAGE", f"Temporary file deleted: {latest_file}")
+                    except Exception as del_err:
+                        log_err("GEN_IMAGE", f"Failed to delete file {latest_file}: {del_err}")
+                return
+
+        # Если папка оказалась пуста или не создалась, но g4f вернул что-то похожее на внешний URL
+        if url_result and url_result.startswith('http'):
+            try:
+                increment_stat(uid, "images")
+                bot.send_photo(
+                    message.chat.id, 
+                    url_result, 
+                    caption=f"Держи: <i>{prompt}</i>", 
+                    reply_to_message_id=message.message_id
+                )
+                return
+            except Exception:
+                pass
+
+        bot.reply_to(message, "Не удалось найти сгенерированную картинку в локальной папке.")
 
     threading.Thread(target=_gen, daemon=True).start()
 
@@ -4446,6 +4746,33 @@ def cmd_pizdec(message: types.Message):
     log_info("PIZDEC", f"user={uid} level={level} done")
 
 
+@bot.message_handler(commands=["ihatefun"])
+def cmd_ihatefun(message: types.Message):
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    register_chat(message.chat.id)
+    if message.from_user.username:
+        update_username(uid, message.from_user.username)
+    track_chat_member(message.chat.id, message.from_user)
+    log_cmd(uid, username, "trash")
+    increment_stat(uid, "commands")
+    set_first_message_if_null(uid)
+    
+    # Получаем текущее состояние (True - хейтит веселье / False - любит)
+    booleanv = does_hate_fun(uid)
+    
+    # Инвертируем значение: если любил — разлюбит, если хейтил — начнет принимать
+    new_state = not booleanv
+    update_user(uid, hate_fun=new_state)
+    
+    # Теперь текст четко соответствует новому состоянию в БД
+    if new_state:
+        curresponse = "Зырис больше не будет ставить реакции на твои сообщения."
+    else:
+        curresponse = "Теперь ты снова будешь видеть реакции Зыриса на своих сообщениях."
+        
+    bot.reply_to(message, curresponse)
+
 @bot.message_handler(commands=["trash"])
 def cmd_trash(message: types.Message):
     uid = get_uid(message)
@@ -4490,7 +4817,29 @@ def cmd_trash(message: types.Message):
         5: "Невероятная удача! 5 окурков! Ты настоящий мусорщик!",
     }
 
-    bot.reply_to(message, f"{responses[count]}\nТеперь у тебя <b>{new_total}</b> окурков.")
+    # Формируем финальный текст
+    caption_text = f"{responses[count]}\nТеперь у тебя <b>{new_total}</b> окурков."
+    
+    # Собираем абсолютный путь к файлу okurok.png в корне бота
+    photo_path = os.path.join(BASE_DIR, "okurok.png")
+
+    try:
+        # Пытаемся открыть и отправить картинку с текстом в качестве описания
+        with open(photo_path, "rb") as photo:
+            bot.send_photo(
+                chat_id=message.chat.id,
+                photo=photo,
+                caption=caption_text,
+                parse_mode="HTML",
+                reply_to_message_id=message.message_id
+            )
+    except FileNotFoundError:
+        # Анти-краш: если файла okurok.png случайно нет в папке, бот отправит просто текст
+        log_err("GAME", f"File okurok.png not found in {BASE_DIR}")
+        bot.reply_to(message, caption_text)
+    except Exception as e:
+        log_err("GAME", f"Failed to send trash photo: {e}")
+        bot.reply_to(message, caption_text)
 
 
 @bot.message_handler(commands=["smoke"])
@@ -4608,292 +4957,412 @@ def cmd_clear(message: types.Message):
     log_cmd(uid, username, "clear")
     increment_stat(uid, "commands")
     
-    # Save current dialog to history before clearing
+    # Auto-save current dialog before clearing
     history = get_history(uid)
-    if history and len(history) > 0:
-        import json
-        # Generate dialog name from first user message
-        dialog_name = "Диалог от " + datetime.now().strftime("%d.%m.%Y %H:%M")
-        for msg in history:
-            if msg.get("role") == "user":
-                dialog_name = msg.get("content", "")[:50]
-                if len(msg.get("content", "")) > 50:
-                    dialog_name += "..."
-                break
-        
-        save_dialog_to_db(uid, dialog_name, history)
+    if history:
+        session_name = f"Диалог {datetime.now().strftime('%d.%m %H:%M')}"
+        save_dialog_session(uid, session_name, history)
     
     clear_history(uid)
-    bot.reply_to(message, "🧹 История диалога очищена и сохранена! Используйте /history для просмотра.")
+    bot.reply_to(message, "🧹 История диалога очищена! ИИ забыл всё, что ты ему писал.")
+
+
+@bot.message_handler(commands=["ytd"])
+def cmd_ytd(message: types.Message):
+    """Download video from YouTube using yt-dlp, with inline button to download audio."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2 or not args[1].startswith("http"):
+        bot.reply_to(message, "❌ Использование: /ytd {ссылка на YouTube}\n\nПример: /ytd https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        return
+    
+    url = args[1]
+    log_cmd(uid, username, "ytd", url[:50])
+    increment_stat(uid, "commands")
+    
+    status_msg = bot.reply_to(message, "⏳ Получаю информацию о видео...")
+    
+    video_path = None
+    try:
+        # First, get info without downloading
+        ydl_opts_info = {
+            'format': 'bestvideo+bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'simulate': True,
+            'socket_timeout': 30,
+            'extract_flat': False,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                raise Exception("Не удалось получить информацию о видео")
+            
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Unknown')
+            video_id = info.get('id', '')
+            
+            duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "N/A"
+            
+            caption = (
+                f"🎬 <b>{title}</b>\n\n"
+                f"👤 Автор: {uploader}\n"
+                f"⏱ Длительность: {duration_str}\n\n"
+                f"📥 Видео готово к загрузке!"
+            )
+            
+            # Update status message with video info and inline button for audio
+            markup = types.InlineKeyboardMarkup()
+            btn_audio = types.InlineKeyboardButton(
+                text="🎵 Скачать аудио",
+                callback_data=f"ytda:{video_id}"
+            )
+            markup.row(btn_audio)
+            
+            # Cache the URL for this video_id
+            YTD_CACHE[video_id] = url
+            
+            bot.edit_message_text(
+                chat_id=status_msg.chat.id,
+                message_id=status_msg.message_id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=markup
+            )
+            
+            # Now download the video
+            ydl_opts_video = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': '/tmp/ytdv_%(id)s.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'merge_output_format': 'mp4',
+                'socket_timeout': 60,
+                'retries': 3,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts_video) as ydl_video:
+                info_video = ydl_video.extract_info(url, download=True)
+                
+                # Find the downloaded video file
+                video_path = f"/tmp/ytdv_{video_id}.mp4"
+                
+                if os.path.exists(video_path):
+                    # Send video
+                    with open(video_path, 'rb') as video_file:
+                        bot.send_video(
+                            chat_id=message.chat.id,
+                            video=video_file,
+                            caption=f"🎬 <b>{title}</b>\n👤 {uploader}",
+                            parse_mode="HTML",
+                            reply_to_message_id=message.message_id
+                        )
+                else:
+                    bot.send_message(
+                        chat_id=message.chat.id,
+                        text=f"❌ Не удалось скачать видео.\n\nНазвание: {title}"
+                    )
+                
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        log_err("YTD", error_msg)
+        if "not available" in error_msg.lower():
+            error_text = "❌ Это видео недоступно для скачивания.\n\nВозможные причины:\n• Видео удалено автором\n• Видео заблокировано в вашем регионе\n• Видео приватное"
+        elif "private" in error_msg.lower():
+            error_text = "❌ Это приватное видео. Я могу скачать только публичные видео."
+        else:
+            error_text = f"❌ Ошибка при скачивании: {error_msg[:200]}"
+        
+        try:
+            bot.edit_message_text(
+                chat_id=status_msg.chat.id,
+                message_id=status_msg.message_id,
+                text=error_text
+            )
+        except:
+            bot.send_message(chat_id=message.chat.id, text=error_text)
+    except Exception as e:
+        error_msg = str(e)
+        log_err("YTD", error_msg)
+        error_text = f"❌ Ошибка при скачивании: {error_msg[:200]}"
+        
+        try:
+            bot.edit_message_text(
+                chat_id=status_msg.chat.id,
+                message_id=status_msg.message_id,
+                text=error_text
+            )
+        except:
+            bot.send_message(chat_id=message.chat.id, text=error_text)
+    finally:
+        # Cleanup video file if it exists
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except:
+                pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ytda:"))
+def cb_ytd_audio(call: types.CallbackQuery):
+    """Handle audio download request from inline button."""
+    uid = get_uid(call)
+    username = call.from_user.username or call.from_user.first_name or "unknown"
+    
+    parts = call.data.split(":")
+    if len(parts) != 2:
+        bot.answer_callback_query(call.id, "❌ Неверный формат запроса", show_alert=True)
+        return
+    
+    video_id = parts[1]
+    
+    # Get URL from cache
+    url = YTD_CACHE.get(video_id)
+    if not url:
+        bot.answer_callback_query(call.id, "❌ Ссылка устарела. Отправьте /ytd заново", show_alert=True)
+        return
+    
+    log_cmd(uid, username, "ytd_audio", video_id)
+    
+    # Acknowledge the callback
+    bot.answer_callback_query(call.id, "⏳ Скачиваю аудио...")
+    
+    mp3_path = None
+    try:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': '/tmp/ytda_%(id)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 60,
+            'retries': 3,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
+            uploader = info.get('uploader', 'Unknown')
+            
+            mp3_path = f"/tmp/ytda_{video_id}.mp3"
+            
+            if os.path.exists(mp3_path):
+                bot.send_audio(
+                    chat_id=call.message.chat.id,
+                    audio=open(mp3_path, 'rb'),
+                    title=title,
+                    performer=uploader,
+                    duration=duration,
+                    reply_to_message_id=call.message.message_id
+                )
+            else:
+                bot.send_message(
+                    chat_id=call.message.chat.id,
+                    text=f"❌ Не удалось скачать аудио."
+                )
+                
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        log_err("YTD_AUDIO", error_msg)
+        if "not available" in error_msg.lower():
+            error_text = "❌ Это видео недоступно для скачивания аудио."
+        else:
+            error_text = f"❌ Ошибка при скачивании аудио: {error_msg[:200]}"
+        bot.send_message(chat_id=call.message.chat.id, text=error_text)
+    except Exception as e:
+        error_msg = str(e)
+        log_err("YTD_AUDIO", error_msg)
+        bot.send_message(
+            chat_id=call.message.chat.id,
+            text=f"❌ Ошибка при скачивании аудио: {error_msg[:200]}"
+        )
+    finally:
+        # Cleanup audio file if it exists
+        if mp3_path and os.path.exists(mp3_path):
+            try:
+                os.remove(mp3_path)
+            except:
+                pass
 
 
 @bot.message_handler(commands=["history"])
 def cmd_history(message: types.Message):
-    """Show user's saved dialog history (last 20 dialogs)."""
+    """Show last 20 dialog sessions with inline buttons."""
     uid = get_uid(message)
     username = message.from_user.username or message.from_user.first_name or "unknown"
     log_cmd(uid, username, "history")
     increment_stat(uid, "commands")
     
-    dialogs = get_user_dialogs(uid, limit=MAX_DIALOG_HISTORY)
+    dialogs = get_user_dialogs(uid, limit=20)
     
     if not dialogs:
-        bot.reply_to(message, "📭 У вас пока нет сохранённых диалогов.\n\nДиалоги сохраняются автоматически при использовании команды /clear или при завершении разговора с ИИ.")
+        bot.reply_to(message, "📭 У вас пока нет сохранённых диалогов.\n\nДиалоги сохраняются автоматически при использовании команды /clear или вручную через /save_dialog.")
         return
     
-    text = f"📚 Ваша история диалогов ({len(dialogs)} из {MAX_DIALOG_HISTORY}):\n\n"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    buttons = []
     
-    keyboard = types.InlineKeyboardMarkup(row_width=1)
-    
-    for i, dlg in enumerate(dialogs):
-        dialog_id, dialog_name, dialog_data_json, created_at = dlg
-        import json
-        dialog_data = json.loads(dialog_data_json)
-        
+    for session_id, session_name, created_at in dialogs:
         # Get first message preview (max 50 chars)
-        first_message = ""
-        if dialog_data and len(dialog_data) > 0:
-            for msg in dialog_data:
-                if msg.get("role") == "user":
-                    first_message = msg.get("content", "")[:50]
-                    if len(msg.get("content", "")) > 50:
-                        first_message += "..."
-                    break
+        messages = get_dialog_messages(session_id)
+        first_msg = ""
+        if messages:
+            first_msg = messages[0]["content"][:50]
+            if len(messages[0]["content"]) > 50:
+                first_msg += "..."
         
-        display_name = dialog_name if dialog_name else "Без названия"
-        time_str = created_at.strftime("%d.%m.%Y %H:%M") if created_at else ""
-        
-        text += f"{i+1}. {display_name}\n   💬 {first_message if first_message else 'Нет сообщений'}\n   🕒 {time_str}\n\n"
-        
-        btn = types.InlineKeyboardButton(
-            text=f"📖 {display_name[:30]}",
-            callback_data=f"dlg_view:{dialog_id}"
-        )
-        keyboard.add(btn)
+        btn_text = f"💬 {session_name}\n   └─ {first_msg}" if first_msg else f"💬 {session_name}"
+        buttons.append(types.InlineKeyboardButton(text=btn_text, callback_data=f"dialog:{session_id}"))
     
-    # Add buttons for actions
-    del_btn = types.InlineKeyboardButton(text="🗑️ Удалить диалог", callback_data="dlg_delete_menu")
-    keyboard.add(del_btn)
+    markup.add(*buttons)
     
-    bot.reply_to(message, text, reply_markup=keyboard)
+    bot.reply_to(message, f"📚 Ваши последние диалоги ({len(dialogs)} из 20):\n\nНажмите на диалог для просмотра.", reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("dlg_view:"))
+@bot.message_handler(commands=["save_dialog"])
+def cmd_save_dialog(message: types.Message):
+    """Manually save current dialog to database."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, "save_dialog")
+    increment_stat(uid, "commands")
+    
+    history = get_history(uid)
+    
+    if not history:
+        bot.reply_to(message, "📭 Нет текущего диалога для сохранения.")
+        return
+    
+    # Extract custom name from command args if provided
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) > 1:
+        session_name = args[1][:100]  # Limit name length
+    else:
+        session_name = f"Диалог {datetime.now().strftime('%d.%m %H:%M')}"
+    
+    session_id = save_dialog_session(uid, session_name, history)
+    
+    if session_id > 0:
+        bot.reply_to(message, f"✅ Диалог \"{session_name}\" сохранён!\n\nВсего сообщений: {len(history)}\n\nИспользуйте /history для просмотра всех сохранённых диалогов.")
+    else:
+        bot.reply_to(message, "❌ Не удалось сохранить диалог.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dialog:"))
 def callback_dialog_view(call: types.CallbackQuery):
-    """Show dialog details with option to continue."""
-    try:
-        dialog_id = int(call.data.split(":")[1])
-    except (IndexError, ValueError):
-        bot.answer_callback_query(call.id, "❌ Ошибка: неверный ID диалога", show_alert=True)
+    """Handle dialog selection - show preview with continue/delete buttons."""
+    uid = str(call.from_user.id)
+    session_id = int(call.data.split(":", 1)[1])
+    
+    # Verify ownership
+    result = db_execute(
+        "SELECT id, session_name FROM dialog_sessions WHERE id = %s AND user_id = %s",
+        (session_id, uid),
+        fetch=True,
+        fetch_one=True
+    )
+    
+    if not result:
+        bot.answer_callback_query(call.id, "❌ Этот диалог вам не принадлежит!", show_alert=True)
         return
     
-    dialog = get_dialog_by_id(dialog_id)
+    session_name = result[1]
+    messages = get_dialog_messages(session_id)
     
-    if not dialog:
-        bot.answer_callback_query(call.id, "❌ Диалог не найден", show_alert=True)
-        return
+    # Build preview text
+    preview_lines = [f"📖 <b>{session_name}</b>\n"]
+    char_count = len(preview_lines[0])
     
-    d_id, user_id, dialog_name, dialog_data_json, created_at = dialog
-    import json
-    dialog_data = json.loads(dialog_data_json)
+    for msg in messages[:5]:  # Show up to 5 messages
+        role_emoji = "👤" if msg["role"] == "user" else "🤖"
+        content_preview = msg["content"][:80]
+        if len(msg["content"]) > 80:
+            content_preview += "..."
+        line = f"{role_emoji} {content_preview}\n"
+        if char_count + len(line) > 3000:  # Telegram limit safety
+            preview_lines.append("...")
+            break
+        preview_lines.append(line)
+        char_count += len(line)
     
-    # Check ownership
-    if str(user_id) != str(get_uid_from_call(call)):
-        bot.answer_callback_query(call.id, "❌ Это не ваш диалог", show_alert=True)
-        return
+    if len(messages) > 5:
+        preview_lines.append(f"\n... и ещё {len(messages) - 5} сообщений")
     
-    # Build dialog preview
-    first_message = ""
-    messages_count = len(dialog_data) if dialog_data else 0
+    preview_text = "".join(preview_lines)
     
-    if dialog_data and len(dialog_data) > 0:
-        for msg in dialog_data:
-            if msg.get("role") == "user":
-                first_message = msg.get("content", "")
-                break
-    
-    preview_text = f"📖 Диалог: {dialog_name if dialog_name else 'Без названия'}\n\n"
-    preview_text += f"💬 Первое сообщение:\n«{first_message[:200]}{'...' if len(first_message) > 200 else ''}»\n\n"
-    preview_text += f"📊 Всего сообщений: {messages_count}\n"
-    if created_at:
-        preview_text += f"🕒 Создан: {created_at.strftime('%d.%m.%Y %H:%M')}\n"
-    
-    keyboard = types.InlineKeyboardMarkup()
-    continue_btn = types.InlineKeyboardButton(
-        text="➡️ Продолжить диалог",
-        callback_data=f"dlg_continue:{dialog_id}"
-    )
-    delete_btn = types.InlineKeyboardButton(
-        text="🗑️ Удалить этот диалог",
-        callback_data=f"dlg_delete:{dialog_id}"
-    )
-    back_btn = types.InlineKeyboardButton(
-        text="⬅️ Назад к списку",
-        callback_data="dlg_back"
-    )
-    keyboard.add(continue_btn)
-    keyboard.add(delete_btn)
-    keyboard.add(back_btn)
+    # Create inline keyboard with continue and delete buttons
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_continue = types.InlineKeyboardButton("▶️ Продолжить диалог", callback_data=f"dialog_continue:{session_id}")
+    btn_delete = types.InlineKeyboardButton("🗑 Удалить", callback_data=f"dialog_delete:{session_id}")
+    markup.add(btn_continue, btn_delete)
     
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         text=preview_text,
-        reply_markup=keyboard
+        parse_mode="HTML",
+        reply_markup=markup
     )
     bot.answer_callback_query(call.id)
 
 
-@bot.callback_query_handler(func=lambda call: call.data == "dlg_back")
-def callback_dialog_back(call: types.CallbackQuery):
-    """Go back to dialog list."""
-    # Just re-trigger the history command logic
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    # Create a fake message object for cmd_history
-    class FakeMessage:
-        def __init__(self, chat_id, from_user):
-            self.chat = type('Chat', (), {'id': chat_id})()
-            self.from_user = from_user
-            self.text = "/history"
-    
-    fake_msg = FakeMessage(
-        call.message.chat.id,
-        call.from_user
-    )
-    cmd_history(fake_msg)
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("dlg_continue:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dialog_continue:"))
 def callback_dialog_continue(call: types.CallbackQuery):
-    """Continue a saved dialog - load it into memory and clear old context."""
-    try:
-        dialog_id = int(call.data.split(":")[1])
-    except (IndexError, ValueError):
-        bot.answer_callback_query(call.id, "❌ Ошибка: неверный ID диалога", show_alert=True)
-        return
+    """Load dialog into memory and clear current history."""
+    uid = str(call.from_user.id)
+    session_id = int(call.data.split(":", 1)[1])
     
-    dialog = get_dialog_by_id(dialog_id)
+    success = load_dialog_to_memory(session_id, uid)
     
-    if not dialog:
-        bot.answer_callback_query(call.id, "❌ Диалог не найден", show_alert=True)
-        return
-    
-    d_id, user_id, dialog_name, dialog_data_json, created_at = dialog
-    import json
-    dialog_data = json.loads(dialog_data_json)
-    
-    # Check ownership
-    uid = get_uid_from_call(call)
-    if str(user_id) != str(uid):
-        bot.answer_callback_query(call.id, "❌ Это не ваш диалог", show_alert=True)
-        return
-    
-    # Clear current in-memory history
-    clear_history(uid)
-    
-    # Load saved dialog into memory
-    for msg in dialog_data:
-        append_history(uid, msg["role"], msg["content"])
-    
-    # Update timestamp
-    update_dialog_timestamp(dialog_id)
-    
-    bot.answer_callback_query(call.id, f"✅ Диалог \"{dialog_name}\" загружен!", show_alert=False)
-    
-    # Send confirmation message
-    bot.send_message(
-        call.message.chat.id,
-        f"✅ Диалог «{dialog_name}» загружен!\n\nТеперь вы можете продолжить разговор с того места, где остановились."
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "dlg_delete_menu")
-def callback_dialog_delete_menu(call: types.CallbackQuery):
-    """Show menu to select dialog for deletion."""
-    uid = get_uid_from_call(call)
-    dialogs = get_user_dialogs(uid, limit=MAX_DIALOG_HISTORY)
-    
-    if not dialogs:
-        bot.answer_callback_query(call.id, "❌ Нет диалогов для удаления", show_alert=True)
-        return
-    
-    keyboard = types.InlineKeyboardMarkup(row_width=1)
-    
-    for dlg in dialogs:
-        dialog_id, dialog_name, _, _ = dlg
-        btn = types.InlineKeyboardButton(
-            text=f"🗑️ {dialog_name if dialog_name else 'Без названия'}",
-            callback_data=f"dlg_delete:{dialog_id}"
+    if success:
+        bot.answer_callback_query(call.id, "✅ Диалог загружен! Текущая история очищена.", show_alert=True)
+        
+        # Get session name for display
+        result = db_execute(
+            "SELECT session_name FROM dialog_sessions WHERE id = %s AND user_id = %s",
+            (session_id, uid),
+            fetch=True,
+            fetch_one=True
         )
-        keyboard.add(btn)
-    
-    back_btn = types.InlineKeyboardButton(text="⬅️ Назад", callback_data="dlg_back")
-    keyboard.add(back_btn)
-    
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="Выберите диалог для удаления:",
-        reply_markup=keyboard
-    )
-    bot.answer_callback_query(call.id)
+        session_name = result[0] if result else "диалог"
+        
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"✅ <b>Диалог \"{session_name}\" загружен!</b>\n\nПамять очищена и контекст восстановлен. Можете продолжать общение."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Не удалось загрузить диалог.", show_alert=True)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("dlg_delete:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dialog_delete:"))
 def callback_dialog_delete(call: types.CallbackQuery):
-    """Delete a specific dialog."""
-    try:
-        dialog_id = int(call.data.split(":")[1])
-    except (IndexError, ValueError):
-        bot.answer_callback_query(call.id, "❌ Ошибка: неверный ID диалога", show_alert=True)
-        return
+    """Delete a dialog session."""
+    uid = str(call.from_user.id)
+    session_id = int(call.data.split(":", 1)[1])
     
-    uid = get_uid_from_call(call)
+    success = delete_dialog_session(session_id, uid)
     
-    # Verify ownership before deleting
-    dialog = get_dialog_by_id(dialog_id)
-    if not dialog:
-        bot.answer_callback_query(call.id, "❌ Диалог не найден", show_alert=True)
-        return
-    
-    if str(dialog[1]) != str(uid):
-        bot.answer_callback_query(call.id, "❌ Это не ваш диалог", show_alert=True)
-        return
-    
-    # Delete the dialog
-    delete_dialog_from_db(dialog_id, uid)
-    
-    bot.answer_callback_query(call.id, "✅ Диалог удалён!", show_alert=False)
-    
-    # Show updated list
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="✅ Диалог успешно удалён!"
-    )
-    
-    # Re-show history after short delay
-    import time
-    time.sleep(0.5)
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    
-    class FakeMessage:
-        def __init__(self, chat_id, from_user):
-            self.chat = type('Chat', (), {'id': chat_id})()
-            self.from_user = from_user
-            self.text = "/history"
-    
-    fake_msg = FakeMessage(
-        call.message.chat.id,
-        call.from_user
-    )
-    cmd_history(fake_msg)
-
-
-def get_uid_from_call(call: types.CallbackQuery) -> str:
-    """Get user ID from callback query."""
-    return str(call.from_user.id)
+    if success:
+        bot.answer_callback_query(call.id, "✅ Диалог удалён!", show_alert=True)
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="🗑 Диалог успешно удалён."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Не удалось удалить диалог.", show_alert=True)
 
 
 @bot.message_handler(commands=["reverse"])
@@ -5811,21 +6280,160 @@ def cmd_quote(message: types.Message):
     replied = message.reply_to_message
     text = replied.text or replied.caption
     photo_file_id = None
+    animation_file_id = None
+    
     if replied.photo:
         photo_file_id = replied.photo[-1].file_id
+    elif replied.animation:
+        animation_file_id = replied.animation.file_id
+    
     if not text or not text.strip():
-        if not photo_file_id:
-            bot.reply_to(message, "Можно сохранять только текстовые сообщения или фото с подписью.")
+        if not photo_file_id and not animation_file_id:
+            bot.reply_to(message, "Можно сохранять только текстовые сообщения, фото с подписью или GIF с подписью.")
             return
-        text = "📷"
+        if animation_file_id:
+            text = "🎬"
+        else:
+            text = "📷"
 
     author_name = replied.from_user.first_name or ""
     if replied.from_user.username:
         author_name = f"@{replied.from_user.username}"
 
-    total = add_quote(message.chat.id, text.strip(), author_name, photo_file_id)
+    total = add_quote(message.chat.id, text.strip(), author_name, photo_file_id, animation_file_id)
     log_cmd(uid, username, "quote", f"saved from {author_name} | total={total}")
     bot.reply_to(message, f"💬 Цитата сохранена! Всего цитат в чате: <b>{total}</b>")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Citatnik Command - View all quotes in current chat
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["citatnik"])
+def cmd_citatnik(message: types.Message):
+    """Show last 20 quotes from current chat with inline buttons."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, "citatnik")
+    increment_stat(uid, "commands")
+    
+    chat_id = message.chat.id
+    quotes = get_quotes_list(chat_id, limit=20)
+    
+    if not quotes:
+        bot.reply_to(message, "📭 В этом чате пока нет сохранённых цитат.\n\nИспользуйте /quote (ответив на сообщение) чтобы сохранить цитату.")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    buttons = []
+    
+    for q in quotes:
+        # Build preview text
+        text_preview = q["text"][:50]
+        if len(q["text"]) > 50:
+            text_preview += "..."
+        
+        icon = "🎬" if q.get("animation_file_id") else ("📷" if q.get("photo_file_id") else "💬")
+        btn_text = f"{icon} #{q['id']} — {q['author']}: {text_preview}"
+        buttons.append(types.InlineKeyboardButton(text=btn_text, callback_data=f"quote:{q['id']}"))
+    
+    markup.add(*buttons)
+    
+    bot.reply_to(message, f"📚 Цитатник чата ({len(quotes)} из последних 20):\n\nНажмите на цитату для просмотра.", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("quote:"))
+def callback_quote_view(call: types.CallbackQuery):
+    """Handle quote selection - show full quote with delete button for admins."""
+    uid = str(call.from_user.id)
+    quote_id = int(call.data.split(":", 1)[1])
+    chat_id = call.message.chat.id
+    
+    # Get quote details
+    result = db_execute(
+        "SELECT id, text, author, photo_file_id, animation_file_id FROM quotes WHERE id = %s AND chat_id = %s",
+        (quote_id, chat_id),
+        fetch=True,
+        fetch_one=True
+    )
+    
+    if not result:
+        bot.answer_callback_query(call.id, "❌ Цитата не найдена!", show_alert=True)
+        return
+    
+    q_id, q_text, q_author, q_photo, q_animation = result
+    
+    # Build display text
+    icon = "🎬" if q_animation else ("📷" if q_photo else "💬")
+    display_text = f"{icon} <b>Цитата #{q_id}</b>\n\n"
+    
+    if q_text and q_text not in ("📷", "🎬"):
+        display_text += f"<i>{q_text}</i>\n\n"
+    
+    display_text += f"— {q_author}"
+    
+    # Check if user is admin/creator of the chat
+    is_admin_user = False
+    try:
+        member = bot.get_chat_member(chat_id, call.from_user.id)
+        is_admin_user = member.status in ("administrator", "creator")
+    except Exception:
+        pass
+    
+    # Create inline keyboard with delete button for admins
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if is_admin_user:
+        btn_delete = types.InlineKeyboardButton("🗑 Удалить", callback_data=f"quote_delete:{q_id}")
+        markup.add(btn_delete)
+    
+    # Send/edit message with quote content
+    try:
+        if q_animation:
+            bot.send_animation(chat_id, q_animation, caption=display_text, parse_mode="HTML", reply_markup=markup)
+        elif q_photo:
+            bot.send_photo(chat_id, q_photo, caption=display_text, parse_mode="HTML", reply_markup=markup)
+        else:
+            if markup:
+                bot.send_message(chat_id, display_text, parse_mode="HTML", reply_markup=markup)
+            else:
+                bot.send_message(chat_id, display_text, parse_mode="HTML")
+        
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        log_err("CITATNIK", f"Failed to send quote: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка при отображении цитаты", show_alert=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("quote_delete:"))
+def callback_quote_delete(call: types.CallbackQuery):
+    """Delete a quote (admin only)."""
+    uid = str(call.from_user.id)
+    quote_id = int(call.data.split(":", 1)[1])
+    chat_id = call.message.chat.id
+    
+    # Verify admin status
+    is_admin_user = False
+    try:
+        member = bot.get_chat_member(chat_id, call.from_user.id)
+        is_admin_user = member.status in ("administrator", "creator")
+    except Exception:
+        pass
+    
+    if not is_admin_user:
+        bot.answer_callback_query(call.id, "❌ Только администраторы могут удалять цитаты!", show_alert=True)
+        return
+    
+    success = delete_quote_by_id(quote_id, chat_id)
+    
+    if success:
+        bot.answer_callback_query(call.id, "✅ Цитата удалена!", show_alert=True)
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text="🗑 Цитата успешно удалена."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Не удалось удалить цитату.", show_alert=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6487,7 +7095,6 @@ def cmd_cr(message: types.Message):
             bot.send_message(chat_id, text, reply_markup=markup, **reply_kwargs_for_message(message))
 
     threading.Thread(target=_spin, daemon=True).start()
-
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cr_repeat:"))
 def callback_cr_repeat(call: types.CallbackQuery):
@@ -7975,7 +8582,642 @@ def cmd_to_award(message: types.Message):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Reminder Checker Thread
+# Items & Shop System Commands
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["items"])
+def cmd_items(message: types.Message):
+    """Show user's inventory - 5 items per page."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    
+    inventory = get_user_inventory(uid)
+    
+    if not inventory:
+        bot.reply_to(message, "📦 У тебя пока нет предметов. Посети /shop чтобы купить что-нибудь!")
+        return
+    
+    # Store pagination state in a simple way - show first page
+    page = 0
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    
+    # Check for page argument
+    parts = message.text.split()
+    if len(parts) > 1:
+        try:
+            page = int(parts[1]) - 1
+            if page < 0:
+                page = 0
+            if page >= total_pages:
+                page = total_pages - 1
+        except ValueError:
+            pass
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if item.get("given_by_creator") else ""
+        currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {item['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {item['price']} {currency_symbol}\n"
+        text += f"   Категория: {item['category']}\n\n"
+    
+    if total_pages > 1:
+        text += "\nИспользуй /items <номер страницы> для навигации.\n"
+        text += "Нажми на предмет чтобы увидеть описание и уничтожить его."
+    
+    # Create inline keyboard with items
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in page_items:
+        btn_text = f"📦 {item['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{item['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.reply_to(message, text, reply_markup=markup)
+
+
+@bot.message_handler(commands=["shop", "store"])
+def cmd_shop(message: types.Message):
+    """Show shop categories."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    
+    categories = load_categories()
+    
+    if not categories:
+        bot.reply_to(message, "🏪 Магазин временно недоступен.")
+        return
+    
+    text = "🏪 <b>Добро пожаловать в магазин!</b>\n\nВыберите категорию:\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat_key, cat_data in categories.items():
+        cat_name = cat_data.get("name", cat_key)
+        cat_emoji = cat_data.get("emoji", "📦")
+        btn_text = f"{cat_emoji} {cat_name}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_cat:{cat_key}"))
+    
+    bot.reply_to(message, text, reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("items_page:"))
+def callback_items_page(call: types.CallbackQuery):
+    """Handle items pagination."""
+    uid = str(call.from_user.id)
+    page_data = call.data.split(":")[1]
+    page = int(page_data)
+    
+    inventory = get_user_inventory(uid)
+    if not inventory:
+        bot.answer_callback_query(call.id, "У тебя нет предметов.")
+        return
+    
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if item.get("given_by_creator") else ""
+        currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {item['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {item['price']} {currency_symbol}\n"
+        text += f"   Категория: {item['category']}\n\n"
+    
+    if total_pages > 1:
+        text += "\nИспользуй кнопки для навигации.\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in page_items:
+        btn_text = f"📦 {item['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{item['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_cat:"))
+def callback_shop_category(call: types.CallbackQuery):
+    """Handle shop category selection - show 10 items per page."""
+    cat_key = call.data.split(":")[1]
+    categories = load_categories()
+    
+    if cat_key not in categories:
+        bot.answer_callback_query(call.id, "Категория не найдена.")
+        return
+    
+    cat_data = categories[cat_key]
+    cat_name = cat_data.get("name", cat_key)
+    cat_emoji = cat_data.get("emoji", "📦")
+    
+    items = load_category_items(cat_key)
+    if not items:
+        bot.answer_callback_query(call.id, "В этой категории пока нет товаров.")
+        return
+    
+    # Store page in callback data or default to 0
+    page = 0
+    items_per_page = 10
+    total_pages = (len(items) + items_per_page - 1) // items_per_page
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(items))
+    page_items = items[start_idx:end_idx]
+    
+    text = f"{cat_emoji} <b>{cat_name}</b>\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        currency_symbol = "🚬" if item.get("currency") == "butts" or item.get("currency") == "cigarettes" else "₽"
+        text += f"<b>{i + 1}. {item['name']}</b> - {item['price']} {currency_symbol}\n"
+    
+    text += f"\nСтраница {page + 1}/{total_pages}"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, item in enumerate(page_items, start=start_idx):
+        btn_text = f"🛒 {item['name']} - {item['price']} {'🚬' if item.get('currency') == 'butts' else '₽'}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_item:{cat_key}:{item['id']}"))
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"shop_cat_page:{cat_key}:{page - 1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"shop_cat_page:{cat_key}:{page + 1}"))
+    nav_buttons.append(types.InlineKeyboardButton("🔙 В меню категорий", callback_data="shop_menu"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_cat_page:"))
+def callback_shop_category_page(call: types.CallbackQuery):
+    """Handle shop category pagination."""
+    parts = call.data.split(":")
+    cat_key = parts[1]
+    page = int(parts[2])
+    
+    categories = load_categories()
+    if cat_key not in categories:
+        bot.answer_callback_query(call.id, "Категория не найдена.")
+        return
+    
+    cat_data = categories[cat_key]
+    cat_name = cat_data.get("name", cat_key)
+    cat_emoji = cat_data.get("emoji", "📦")
+    
+    items = load_category_items(cat_key)
+    if not items:
+        bot.answer_callback_query(call.id, "В этой категории пока нет товаров.")
+        return
+    
+    items_per_page = 10
+    total_pages = (len(items) + items_per_page - 1) // items_per_page
+    
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+    
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(items))
+    page_items = items[start_idx:end_idx]
+    
+    text = f"{cat_emoji} <b>{cat_name}</b>\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        currency_symbol = "🚬" if item.get("currency") == "butts" or item.get("currency") == "cigarettes" else "₽"
+        text += f"<b>{i + 1}. {item['name']}</b> - {item['price']} {currency_symbol}\n"
+    
+    text += f"\nСтраница {page + 1}/{total_pages}"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, item in enumerate(page_items, start=start_idx):
+        btn_text = f"🛒 {item['name']} - {item['price']} {'🚬' if item.get('currency') == 'butts' else '₽'}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_item:{cat_key}:{item['id']}"))
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"shop_cat_page:{cat_key}:{page - 1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"shop_cat_page:{cat_key}:{page + 1}"))
+    nav_buttons.append(types.InlineKeyboardButton("🔙 В меню категорий", callback_data="shop_menu"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "shop_menu")
+def callback_shop_menu(call: types.CallbackQuery):
+    """Return to shop main menu."""
+    categories = load_categories()
+    
+    text = "🏪 <b>Добро пожаловать в магазин!</b>\n\nВыберите категорию:\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat_key, cat_data in categories.items():
+        cat_name = cat_data.get("name", cat_key)
+        cat_emoji = cat_data.get("emoji", "📦")
+        btn_text = f"{cat_emoji} {cat_name}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"shop_cat:{cat_key}"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_item:"))
+def callback_shop_item(call: types.CallbackQuery):
+    """Show item details and buy option."""
+    parts = call.data.split(":")
+    cat_key = parts[1]
+    item_id = parts[2]
+    
+    items = load_category_items(cat_key)
+    item = None
+    for it in items:
+        if it["id"] == item_id:
+            item = it
+            break
+    
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден.")
+        return
+    
+    currency_symbol = "🚬" if item.get("currency") == "butts" or item.get("currency") == "cigarettes" else "₽"
+    currency_name = "окурков" if item.get("currency") == "butts" else "сигарет" if item.get("currency") == "cigarettes" else "рублей"
+    
+    text = f"<b>{item['name']}</b>\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"<b>Цена:</b> {item['price']} {currency_symbol} ({currency_name})\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("💰 Купить", callback_data=f"shop_buy:{cat_key}:{item_id}"))
+    markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"shop_cat:{cat_key}"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shop_buy:"))
+def callback_shop_buy(call: types.CallbackQuery):
+    """Handle item purchase."""
+    uid = str(call.from_user.id)
+    parts = call.data.split(":")
+    cat_key = parts[1]
+    item_id = parts[2]
+    
+    items = load_category_items(cat_key)
+    item = None
+    for it in items:
+        if it["id"] == item_id:
+            item = it
+            break
+    
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден.")
+        return
+    
+    price = item["price"]
+    currency = item.get("currency", "rubles")
+    
+    # Check user balance
+    if currency == "rubles":
+        user_rubles = get_user_rubles(uid)
+        if user_rubles < price:
+            bot.answer_callback_query(call.id, f"Недостаточно рублей! Нужно {price}, у тебя {user_rubles}", show_alert=True)
+            return
+        # Deduct rubles
+        set_user_rubles(uid, user_rubles - price)
+    elif currency in ("butts", "cigarettes"):
+        user_butts = get_user_cigarettes(uid)
+        if user_butts < price:
+            bot.answer_callback_query(call.id, f"Недостаточно окурков! Нужно {price}, у тебя {user_butts}", show_alert=True)
+            return
+        # Deduct butts
+        set_user_cigarettes(uid, user_butts - price)
+    else:
+        bot.answer_callback_query(call.id, "Неизвестная валюта.")
+        return
+    
+    # Give item to user
+    give_item_to_user(uid, item["id"], item["name"], item["description"], cat_key, price, currency, by_creator=False)
+    
+    bot.answer_callback_query(call.id, f"✅ Куплено: {item['name']}!", show_alert=True)
+    
+    # Update message
+    currency_symbol = "🚬" if currency in ("butts", "cigarettes") else "₽"
+    text = f"<b>{item['name']}</b>\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"<b>Цена:</b> {price} {currency_symbol}\n"
+    text += f"\n✅ <i>Куплено!</i>"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🔙 В категорию", callback_data=f"shop_cat:{cat_key}"))
+    markup.add(types.InlineKeyboardButton("🏪 В меню магазина", callback_data="shop_menu"))
+    markup.add(types.InlineKeyboardButton("📦 Мои предметы", callback_data=f"items_list:{uid}"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("item_view:"))
+def callback_item_view(call: types.CallbackQuery):
+    """Show item details from inventory with destroy option."""
+    item_db_id_str = call.data.split(":")[1]
+    try:
+        item_db_id = int(item_db_id_str)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Ошибка.")
+        return
+    
+    uid = str(call.from_user.id)
+    item = get_item_by_db_id(item_db_id, uid)
+    
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден.")
+        return
+    
+    creator_mark = " 👑 <i>(выдано создателем бота)</i>" if item.get("given_by_creator") else ""
+    currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+    
+    text = f"<b>{item['name']}</b>{creator_mark}\n\n"
+    text += f"{item['description']}\n\n"
+    text += f"<b>Цена:</b> {item['price']} {currency_symbol}\n"
+    text += f"<b>Категория:</b> {item['category']}\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("🗑️ Уничтожить", callback_data=f"item_destroy:{item_db_id}"))
+    markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="items_back"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("item_destroy:"))
+def callback_item_destroy(call: types.CallbackQuery):
+    """Destroy an item from inventory."""
+    uid = str(call.from_user.id)
+    item_db_id_str = call.data.split(":")[1]
+    try:
+        item_db_id = int(item_db_id_str)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Ошибка.")
+        return
+    
+    item = get_item_by_db_id(item_db_id, uid)
+    if not item:
+        bot.answer_callback_query(call.id, "Предмет не найден или уже уничтожен.")
+        return
+    
+    delete_user_item(item_db_id, uid)
+    bot.answer_callback_query(call.id, f"🗑️ {item['name']} уничтожен!", show_alert=True)
+    
+    # Show updated inventory
+    cmd_items_call = types.Message(chat=call.message.chat, from_user=call.from_user, message_id=call.message.message_id, text="/items")
+    # Just send a new message with inventory
+    inventory = get_user_inventory(uid)
+    if not inventory:
+        bot.edit_message_text("📦 У тебя больше нет предметов.", call.message.chat.id, call.message.message_id)
+        return
+    
+    page = 0
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, itm in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if itm.get("given_by_creator") else ""
+        currency_symbol = "🚬" if itm["currency"] == "cigarettes" else "₽" if itm["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {itm['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {itm['price']} {currency_symbol}\n"
+        text += f"   Категория: {itm['category']}\n\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for itm in page_items:
+        btn_text = f"📦 {itm['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{itm['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "items_back")
+def callback_items_back(call: types.CallbackQuery):
+    """Return to items list."""
+    uid = str(call.from_user.id)
+    inventory = get_user_inventory(uid)
+    
+    if not inventory:
+        bot.edit_message_text("📦 У тебя пока нет предметов.", call.message.chat.id, call.message.message_id)
+        return
+    
+    page = 0
+    items_per_page = 5
+    total_pages = (len(inventory) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(inventory))
+    page_items = inventory[start_idx:end_idx]
+    
+    text = f"📦 <b>Твои предметы</b> (страница {page + 1}/{total_pages})\n\n"
+    
+    for i, item in enumerate(page_items, start=start_idx):
+        creator_mark = " 👑 <i>(выдано создателем)</i>" if item.get("given_by_creator") else ""
+        currency_symbol = "🚬" if item["currency"] == "cigarettes" else "₽" if item["currency"] == "rubles" else ""
+        text += f"<b>{i + 1}. {item['name']}</b>{creator_mark}\n"
+        text += f"   Цена: {item['price']} {currency_symbol}\n"
+        text += f"   Категория: {item['category']}\n\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in page_items:
+        btn_text = f"📦 {item['name']}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"item_view:{item['id']}"))
+    
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"items_page:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"items_page:{page + 1}"))
+        if nav_buttons:
+            markup.add(*nav_buttons)
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("items_list:"))
+def callback_items_list_from_shop(call: types.CallbackQuery):
+    """Show items list when called from shop."""
+    uid = call.data.split(":")[1]
+    # Reuse cmd_items logic
+    cmd_items_msg = types.Message(chat=call.message.chat, from_user=call.from_user, message_id=call.message.message_id, text="/items")
+    cmd_items(cmd_items_msg)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Award Command (updated for to_award_item)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["to_award"])
+def cmd_to_award(message: types.Message):
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+
+    if not can_award(message):
+        log_cmd(uid, username, "to_award", "DENIED - not admin")
+        bot.reply_to(message, "У тебя нет прав для награждения. Только админ группы или создатель бота могут награждать.")
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "Ответь на сообщение человека, которого хочешь наградить.")
+        return
+
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        bot.reply_to(message, "Нельзя наградить бота.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        bot.reply_to(message, "Использование: /to_award &lt;название награды&gt; (в ответ на сообщение)\nПример: /to_award Лучший курильщик")
+        return
+
+    award_name = parts[1].strip()
+    target_uid = str(target.id)
+    get_or_create_user(target_uid)
+
+    add_award(target_uid, award_name)
+    target_display = get_display_name(target)
+
+    log_cmd(uid, username, "to_award", f"target={target_uid} | award='{award_name}'")
+
+    bot.reply_to(message,
+        f"🏅 <b>Награда вручена!</b>\n\n"
+        f"Пользователь <b>{target_display}</b> получил награду: <b>{award_name}</b>\n\n"
+        f"Награда отображается в /stats."
+    )
+
+
+@bot.message_handler(commands=["to_award_item"])
+def cmd_to_award_item(message: types.Message):
+    """Give any item to a user (creator only). Usage: /to_award_item {emoji} {name} {description} {amount}"""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+
+    # Only bot creator can use this
+    if not is_bot_creator(message):
+        log_cmd(uid, username, "to_award_item", "DENIED - not creator")
+        bot.reply_to(message, "⛔ Только создатель бота может выдавать предметы этой командой.")
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "⚠️ Ответь на сообщение человека, которому хочешь выдать предмет.")
+        return
+
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        bot.reply_to(message, "Нельзя выдать предмет боту.")
+        return
+
+    # Parse arguments using '|' as delimiter
+    # Format: /to_award_item emoji|name|description|amount
+    text = message.text
+    if not text:
+        bot.reply_to(message, "⚠️ Пустая команда.")
+        return
+
+    # Remove command part
+    if text.startswith("/to_award_item"):
+        text = text[len("/to_award_item"):].strip()
+
+    parts = text.split("|")
+    if len(parts) < 4:
+        bot.reply_to(message,
+            "⚠️ Использование: /to_award_item {эмоджи}|{название}|{описание}|{сколько}\n"
+            "Пример: /to_award_item 🎮|Игровая приставка|Ретро консоль 90х|1"
+        )
+        return
+
+    emoji = parts[0].strip()
+    item_name = parts[1].strip()
+    item_desc = parts[2].strip()
+    amount_str = parts[3].strip()
+
+    try:
+        amount = int(amount_str)
+        if amount <= 0:
+            raise ValueError()
+    except ValueError:
+        bot.reply_to(message, "Количество должно быть положительным числом.")
+        return
+
+    target_uid = str(target.id)
+    get_or_create_user(target_uid)
+
+    # Give the item(s)
+    given_count = 0
+    for i in range(amount):
+        unique_id = f"custom_{target_uid}_{int(time.time())}_{i}"
+        if give_item_to_user(target_uid, unique_id, f"{emoji} {item_name}", item_desc, "custom", 0, "rubles", by_creator=True):
+            given_count += 1
+
+    target_display = get_display_name(target)
+    log_cmd(uid, username, "to_award_item", f"target={target_uid} | item={item_name} | count={given_count}")
+
+    bot.reply_to(message,
+        f"✅ <b>Предмет(ы) выданы!</b>\n\n"
+        f"Пользователь <b>{target_display}</b> получил: <b>{emoji} {item_name}</b>\n"
+        f"Количество: <b>{given_count}</b> шт.\n"
+        f"Описание: {item_desc}\n\n"
+        f"👑 <i>Выдано создателем бота (отмечено в /items)</i>"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Promo Code Commands (updated for items)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def reminder_checker():
@@ -8293,6 +9535,9 @@ def should_respond(message: types.Message) -> bool:
 
     return False
 
+@bot.message_handler(commands=['osemenit'])
+def send_welcome(message):
+    bot.reply_to(message, "🥛 Вы осеменили зыриса. 🥛")
 
 def extract_clean_text(message: types.Message) -> str:
     text = message.text or ""
@@ -8330,10 +9575,15 @@ def handle_text(message: types.Message):
     if str(uid) in BANK_PENDING:
         return
 
-    if random.random() < REACTION_CHANCE:
+    if random.random() < REACT_CHANCE:
         try:
-            reactions = ["👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "😂", "🤡"]
+            reactions = ["😁", "🤣", "😎", "🥰", "😍", "😘", "🤪", "😏", "😐", "🤨", "😴", "😢", "😭", "😱", "😨", "🤯", "😡", "🤬", "🤮", "🥴", "🤔", "😇", "🤩", "🤓", "🫡", "🤠", "🥱", "🤗", "🙈", "🙉", "🙊", "🎄", "☃", "🎅", "🤷", "🤷‍♀️", "🤷‍♂️", "👨‍💻", "🤡", "❤", "❤️‍🔥", "💘", "💔", "💋", "🔥", "🦄", "👀", "👻", "😈", "🗿", "🌚", "🕊️", "🎃", "🍓", "🌭", "🍾", "🍌", "🐳", "🎉", "⚡", "💊", "🆒", "👾", "🏆", "💯", "👍", "👎", "👌", "👏", "🤝", "🙏", "🖕", "✍️", "💅"]
             reaction = random.choice(reactions)
+            # ЗАПРЕТ на реакции
+            udata = get_or_create_user(uid)
+            DOES_THIS_MAN_HATE_FUN = udata.get("hate_fun", False)
+            if DOES_THIS_MAN_HATE_FUN:
+            	return
             bot.set_message_reaction(chat_id=message.chat.id, message_id=message.message_id, reaction=[types.ReactionTypeEmoji(reaction)])
         except Exception as e:
             log_err("REACTION", f"Failed: {e}")
