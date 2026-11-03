@@ -4,8 +4,44 @@ Uses PostgreSQL for data persistence (configure in config.json)
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CHANGELOG / ИСТОРИЯ ИЗМЕНЕНИЙ
+# 03.11.2026 — Работа с изображениями и ИИ:
+#   * Фото работает и когда оно прикреплено к команде/тексту (caption), и при ответе на фото.
+#   * Двухэтапный конвейер ИИ: если есть изображение — сначала оно отправляется
+#     vision-модели deepseek/deepseek-v4.1-flash-free для досконального описания,
+#     затем пересказ + текст пользователя + история чата передаются модели Hy3.
+#   * Изображения скачиваются в папку temp/ рядом с ботом и удаляются после обработки.
+#   * Добавлен дебаг-лог: печатается полный ответ deepseek, а также этапы
+#     поиска, скачивания и удаления файла изображения.
+# 03.11.2026 — Форматирование и статистика:
+#   * Ответы ИИ форматируются в HTML: **жирный**, *курсив*, ***жирный+курсив***,
+#     `код`, ```блоки кода```, ~~зачёркнутый~~ (Markdown от ИИ конвертируется в HTML).
+#   * /stats: корректно показывает статистику (в т.ч. чужую), сообщения разделены
+#     на «с ботом» и «в чате», график общительности строится по данным чата.
+#   * Бот считает ВООБЩЕ ВСЕ сообщения в чате (текст, фото, видео, стикеры,
+#     документы и т.д.) для всех пользователей, даже если бот на них не отвечает.
+#   * Топ по общительности (/top_chat) включает только людей из текущего чата.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN CONFIGURATION - Edit these values
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# ── РЕЖИМ РАБОТЫ ИИ ──────────────────────────────────────────────────────────
+# WORK_TYPE = 1 — старый режим: все запросы ИИ идут через OpenRouter
+#               (https://api.orcarouter.ai/v1/, ключ "openrouter_api_key" в config.json),
+#               модели VISION_MODEL / CHAT_MODEL.
+# WORK_TYPE = 2 — новый режим: весь ИИ (кроме генерации картинок — она не меняется)
+#               работает через второй API (https://api.reformboss.com/v1/chat/completions),
+#               API-ключ берётся из поля "TWO_API" в config.json (или env TWO_API_KEY),
+#               используются модели TWO_VISION (описание фото) и TWO_MODEL (ответ).
+WORK_TYPE = 2
+
+# Настройки второго API (используются только при WORK_TYPE = 2)
+TWO_API_URL = "https://api.reformboss.com/v1/chat/completions"
+TWO_MODEL = "qwen-plus"                       # основная модель для ответов
+TWO_VISION = "qwen-vl-max"                    # vision-модель для описания изображений
+
 # Перечислите здесь ID тех, кого нужно полностью игнорировать
 THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ] 
 BOT_TOKEN = ""  # Set via config.json or BOT_TOKEN env var
@@ -108,10 +144,13 @@ import random
 import re
 import threading
 import time
+import uuid
 import warnings
 from collections import deque
 from datetime import datetime, date
 from typing import Optional
+import urllib.request
+from urllib.request import Request, urlopen
 
 import psycopg2
 from psycopg2 import pool
@@ -177,11 +216,119 @@ def log_err(category: str, error: str):
 def log_info(category: str, message: str):
     log("INFO", category, message)
 
+DEBUG = os.environ.get("DEBUG", "1") not in ("0", "false", "False")
+
+def log_debug(message: str):
+    """Отладочный лог (см. переменную окружения DEBUG)."""
+    if DEBUG:
+        log("DEBUG", "DBG", message)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Markdown -> HTML formatting for AI answers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_+\-#]*\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_ITALIC_RE = re.compile(r"\*\*\*(.+?)\*\*\*")
+_BOLD_STAR_RE = re.compile(r"\*\*(.+?)\*\*")
+_BOLD_UNDERSCORE_RE = re.compile(r"__(.+?)__")
+_STRIKE_RE = re.compile(r"~~(.+?)~~")
+_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+_ITALIC_UNDERSCORE_RE = re.compile(r"(?<!_)_([^_\n]+)_(?!_)")
+
+
+def _md_escape(text: str) -> str:
+    """Экранирует текст для Telegram HTML."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def markdown_to_html(text: str) -> str:
+    """Конвертирует базовый Markdown (как его обычно возвращают ИИ) в Telegram HTML.
+
+    Поддерживается: **жирный**, __жирный__, *курсив*, _курсив_, ***жирный+курсив***,
+    ~~зачёркнутый~~, `код`, ```блоки кода```. Обычный HTML-подобный текст экранируется,
+    чтобы не ломать разметку сообщения.
+    """
+    if not text:
+        return ""
+    placeholders: dict = {}
+
+    def _stash(html_fragment: str) -> str:
+        key = f"\x00PH{len(placeholders)}\x00"
+        placeholders[key] = html_fragment
+        return key
+
+    # 1) Блоки кода ```...``` — содержимое экранируется для HTML как есть
+    def _code_block(m):
+        code = m.group(1).strip("\n")
+        return _stash(f"<pre><code>{_md_escape(code)}</code></pre>")
+
+    text = _CODE_BLOCK_RE.sub(_code_block, text)
+
+    # 2) Остальной текст экранируем, затем применяем inline-разметку поверх placeholder'ов
+    text = _md_escape(text)
+
+    def _inline_code(m):
+        return _stash(f"<code>{m.group(1)}</code>")
+
+    text = _INLINE_CODE_RE.sub(_inline_code, text)
+    text = _BOLD_ITALIC_RE.sub(lambda m: f"<b><i>{m.group(1)}</i></b>", text)
+    text = _BOLD_STAR_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _BOLD_UNDERSCORE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", text)
+    text = _ITALIC_STAR_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+    text = _ITALIC_UNDERSCORE_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+
+    # 3) Возвращаем сохранённые блоки кода
+    for key, frag in placeholders.items():
+        text = text.replace(key, frag)
+    return text
+
+
+def _validate_html(html_text: str) -> bool:
+    """Проверяет, что HTML-разметка корректна для Telegram (парные теги)."""
+    stack: list = []
+    for m in re.finditer(r"<(/?)(b|i|u|s|strike|code|pre|a|tg-spoiler)\b[^>]*>", html_text):
+        closing, tag = m.group(1), m.group(2)
+        if closing:
+            if not stack or stack[-1] != tag:
+                return False
+            stack.pop()
+        else:
+            if tag in ("br", "img"):
+                continue
+            stack.append(tag)
+    return not stack
+
+
+def send_ai_answer(message: types.Message, answer: str) -> None:
+    """Отправляет ответ ИИ с форматированием (Markdown -> HTML).
+
+    Если после конвертации HTML получился невалидным или Telegram его отвергает —
+    сообщение отправляется без parse_mode (спасаются хотя бы переводы строк).
+    """
+    formatted = markdown_to_html(answer)
+    reply_kw = {"reply_to_message_id": message.message_id}
+    thread_id = get_message_thread_id(message)
+    if thread_id is not None:
+        reply_kw["message_thread_id"] = thread_id
+
+    if formatted != answer and _validate_html(formatted):
+        try:
+            bot.send_message(message.chat.id, formatted, parse_mode="HTML", **reply_kw)
+            return
+        except Exception as e:
+            log_err("FORMAT", f"HTML send failed, falling back to plain text: {e}")
+    bot.send_message(message.chat.id, answer, parse_mode=None, **reply_kw)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Config & Initialization
 # ═══════════════════════════════════════════════════════════════════════════════
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMP_DIR = os.path.join(BASE_DIR, "temp")  # сюда сохраняем скачанные фото перед обработкой
+os.makedirs(TEMP_DIR, exist_ok=True)
 START_TIME = datetime.now()
 BOT_READY_AT = time.time()
 
@@ -870,6 +1017,94 @@ def _get_openrouter_client():
 
 openrouter_client = _get_openrouter_client()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Второй API (WORK_TYPE = 2): reformboss chat/completions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_two_api_key() -> str:
+    """API-ключ второго режима работы ИИ: из config.json (поле TWO_API) или env."""
+    config = load_config()
+    return (
+        config.get("TWO_API")
+        or config.get("two_api")
+        or os.getenv("TWO_API_KEY")
+        or os.getenv("IISHKO_API_KEY")
+        or ""
+    )
+
+
+def _build_proxy_opener():
+    """Если в боте настроен прокси (PROXY_URL) — используем его и для urllib-запросов."""
+    if not PROXY_URL:
+        return None
+    proxy_url = PROXY_URL if "://" in PROXY_URL else f"http://{PROXY_URL}"
+    return build_opener(
+        ProxyHandler({"http": proxy_url, "https": proxy_url})
+    )
+
+
+def two_chat_completion(model: str, messages: list, timeout: int = 120) -> str:
+    """Запрос к второму API (api.reformboss.com) по схеме OpenAI chat/completions.
+
+    Используется при WORK_TYPE = 2 для всей логики ИИ (кроме генерации картинок).
+    Возвращает текст ответа модели; при ошибке бросает исключение.
+    """
+    api_key = _get_two_api_key()
+    if not api_key:
+        raise RuntimeError("TWO_API key not found in config.json")
+
+    body = json.dumps({"model": model, "messages": messages}).encode()
+    req = Request(
+        TWO_API_URL,
+        data=body,
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+        },
+    )
+    opener = _build_proxy_opener()
+    if opener is not None:
+        with opener.open(req, timeout=timeout) as r:
+            payload = json.load(r)
+    else:
+        with urlopen(req, timeout=timeout) as r:
+            payload = json.load(r)
+    content = payload["choices"][0]["message"]["content"]
+    if content is None or not str(content).strip():
+        raise RuntimeError("Empty response from TWO API")
+    return str(content).strip()
+
+
+def ai_chat_completion(model_type1: str, messages: list, debug_tag: str = "AI") -> str:
+    """Единая точка выхода ИИ-логики (кроме генерации картинок).
+
+    При WORK_TYPE = 2 запрос идёт во второй API (модель выбирается автоматически:
+    TWO_MODEL для чата, TWO_VISION для vision-запросов), иначе — через OpenRouter.
+    """
+    if WORK_TYPE == 2:
+        if model_type1 == VISION_MODEL:
+            model = TWO_VISION
+        elif model_type1 == CHAT_MODEL:
+            model = TWO_MODEL
+        else:
+            model = model_type1
+        log_debug(f"{debug_tag}: WORK_TYPE=2 → TWO API ({TWO_API_URL}), model={model}")
+        return two_chat_completion(model=model, messages=messages)
+
+    if openrouter_client is None:
+        raise RuntimeError("OpenRouter client not initialized")
+    log_debug(f"{debug_tag}: WORK_TYPE=1 → OpenRouter, model={model_type1}")
+    response = openrouter_client.chat.completions.create(
+        model=model_type1,
+        messages=messages,
+    )
+    content = response.choices[0].message.content
+    if content is None or not str(content).strip():
+        raise RuntimeError("Empty response from OpenRouter")
+    return str(content).strip()
+
+
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in THIS_MEN_HATE_FUN, content_types=['text', 'photo', 'voice', 'document', 'animation'])
 def blacklisted_user_filter(message: types.Message):
     # Бот видит сообщение от забаненного, логирует его и ничего не делает в ответ
@@ -892,6 +1127,45 @@ def _reply_context_message(_bot_instance, message: types.Message):
 @bot.middleware_handler(update_types=["callback_query"])
 def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
     set_reply_context_from_call(call)
+
+
+ALL_MESSAGE_TYPES = [
+    "text", "audio", "document", "animation", "game", "photo", "sticker",
+    "video", "voice", "video_note", "contact", "location", "venue",
+    "poll", "dice", "story",
+]
+
+
+@bot.message_handler(content_types=ALL_MESSAGE_TYPES)
+def count_all_chat_messages(message: types.Message):
+    """Считает ВООБЩЕ ВСЕ сообщения в чате для статистики общительности.
+
+    Срабатывает на каждое входящее сообщение (текст, фото, видео, стикеры,
+    документы и т.д.), регистрирует автора как участника чата и увеличивает
+    счётчик сообщений этого пользователя в этом чате. Работает даже тогда,
+    когда бот на сообщение не отвечает. Команды (/start и т.п.) из счётчика
+    исключены — они считаются отдельно как команды.
+    """
+    try:
+        user = message.from_user
+        if not user or user.is_bot:
+            return
+        uid = str(user.id)
+        get_or_create_user(uid)
+        if user.username:
+            update_username(uid, user.username)
+        set_first_message_if_null(uid)
+        register_chat(message.chat.id)
+        track_chat_member(message.chat.id, user)
+
+        raw_text = (message.text or "") + " " + (message.caption or "")
+        if raw_text.lstrip().startswith("/"):
+            return  # это команда — её считают командные хендлеры
+
+        increment_stat(uid, "messages")
+        track_daily_chat_activity(uid, message.chat.id)
+    except Exception as e:
+        log_err("MSG_COUNT", f"Failed to count chat message: {e}")
 
 # Silero model
 silero_model = None
@@ -1503,7 +1777,11 @@ def get_daily_chat_activity(uid: str, chat_id: Optional[int] = None) -> list:
     return []
 
 def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None) -> list:
-    """Get top users by total messages. table: 'bot' or 'chat'. Chat top is per chat_id."""
+    """Get top users by total messages. table: 'bot' or 'chat'. Chat top is per chat_id.
+
+    Для топа по общительности в чате ('chat') в список попадают ТОЛЬКО пользователи,
+    которые пишут в этом чате (проверка по таблице chat_members).
+    """
     if table == "bot":
         results = db_execute(
             "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
@@ -1513,16 +1791,24 @@ def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None
             fetch=True
         )
     else:
-        params: tuple = (chat_id, limit) if chat_id is not None else (limit,)
-        where = "WHERE da.chat_id = %s " if chat_id is not None else ""
-        results = db_execute(
-            f"SELECT da.user_id, SUM(da.message_count) AS total, u.username "
-            f"FROM daily_chat_activity da JOIN users u ON u.id = da.user_id "
-            f"{where}"
-            f"GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s",
-            params,
-            fetch=True
-        )
+        if chat_id is not None:
+            query = (
+                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
+                "FROM daily_chat_activity da "
+                "JOIN users u ON u.id = da.user_id "
+                "WHERE da.chat_id = %s AND da.user_id IN "
+                "(SELECT user_id FROM chat_members WHERE chat_id = %s) "
+                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+            )
+            params: tuple = (chat_id, chat_id, limit)
+        else:
+            query = (
+                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
+                "FROM daily_chat_activity da JOIN users u ON u.id = da.user_id "
+                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+            )
+            params = (limit,)
+        results = db_execute(query, params, fetch=True)
     if results:
         return [(r[0], int(r[1]), r[2] or "") for r in results]
     return []
@@ -3264,13 +3550,64 @@ def get_system_prompt(role_key: str) -> str:
     role = roles.get(role_key, roles.get("default", {}))
     return role.get("prompt", "Ты полезный ассистент.")
 
+VISION_MODEL = "deepseek/deepseek-v4.1-flash-free"  # Первая модель: подробно описывает изображение
+CHAT_MODEL = "tencent/hy3-free"                      # Вторая модель: отвечает на основе описания и истории
+
+
+def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
+    """Попросить vision-модель досконально описать изображение, переданное в виде data URL.
+
+    При WORK_TYPE = 1 — deepseek/deepseek-v4.1-flash-free через OpenRouter,
+    при WORK_TYPE = 2 — TWO_VISION через второй API (ai_chat_completion сам выберет).
+
+    Возвращает текст описания или None, если описание получить не удалось.
+    """
+    if WORK_TYPE != 2 and openrouter_client is None:
+        log_err("VISION", f"OpenRouter client not initialized for user={uid}")
+        return None
+
+    vision_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — внимательный анализатор изображений. Опиши полученное изображение "
+                "максимально досконально: что на нём изображено, все объекты, людей, их действия, "
+                "выражения, одежду, расположение, фон, надписи и текст (перечисли его буквально), "
+                "цвета, стиль, атмосферу и любые мелкие детали. Отвечай подробным связным текстом на русском языке."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Опиши это изображение максимально подробно:"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    try:
+        log_info("VISION", f"Requesting image description from {VISION_MODEL} for user={uid}")
+        log_debug(f"VISION -> {VISION_MODEL}: sending image (data_url length={len(data_url)} chars)")
+        description = ai_chat_completion(VISION_MODEL, vision_messages, debug_tag="VISION").strip()
+        if not description:
+            log_err("VISION", f"Empty description returned for user={uid}")
+            return None
+        log_debug(f"VISION <- {VISION_MODEL} answered:\n{description}")
+        return description
+    except Exception as e:
+        log_err("VISION", f"Image description failed for user={uid}: {e}")
+        log_debug(f"VISION <- {VISION_MODEL} ERROR: {e}")
+        return None
+
+
 def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> str:
     """Отправить сообщение ИИ.
 
     Если переданы байты изображения (фото прикреплено к тексту сообщения либо
-    пользователь ответил на фото), оно передаётся модели в формате OpenAI
-    мультимодального сообщения:
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    пользователь ответил на фото), то сначала оно отправляется vision-модели
+    deepseek/deepseek-v4.1-flash-free, которая досконально пересказывает, что
+    на фото. Этот пересказ затем добавляется к сообщению пользователя и вместе
+    с историей чата передаётся основной модели Hy3 (tencent/hy3-free).
     """
     role_key = get_user_role(uid)
     base_system_prompt = get_system_prompt(role_key)
@@ -3285,18 +3622,40 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     # Сохраняем в историю чистый текст (без base64-картинок, чтобы не раздувать контекст)
     text_for_history = (user_message or "").strip() or "[изображение без подписи]"
     history = append_history(uid, "user", text_for_history)
+
+    log_debug(
+        f"AI: ask_ai called for user={uid}, has_image={image_bytes is not None}"
+        + (f", image_size={len(image_bytes)} bytes" if image_bytes else "")
+    )
     
-    # Формируем содержимое текущего пользовательского сообщения.
-    # Если есть фото — отдаём ИИ в формате OpenAI мультимодального сообщения:
-    # {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    # Если есть фото — сначала отдаём его vision-модели deepseek/deepseek-v4.1-flash-free,
+    # она досконально пересказывает изображение, и её пересказ подмешивается в промпт
+    # для основной модели Hy3 вместо самой картинки.
     if image_bytes is not None:
         try:
             data_url = _image_to_data_url(image_bytes)
+            log_debug(f"AI: image encoded to data URL ({len(data_url)} chars)")
         except Exception as e:
             log_err("AI", f"Failed to encode image for user={uid}: {e}")
+            log_debug(f"AI: image encoding FAILED: {e}")
             data_url = None
 
-        if data_url:
+        image_description = describe_image_for_ai(uid, data_url) if data_url else None
+
+        if image_description:
+            log_debug(
+                f"AI: description from {VISION_MODEL} received ({len(image_description)} chars), "
+                f"appending it to the prompt for {CHAT_MODEL}"
+            )
+            current_user_content = (
+                f"{text_for_history}\n\n"
+                f"[Описание изображения от vision-модели {VISION_MODEL}]:\n{image_description}"
+            )
+        elif data_url:
+            # Если описание получить не удалось — пробуем отправить картинку напрямую
+            log_debug(
+                f"AI: no description from {VISION_MODEL} — falling back to multimodal request to {CHAT_MODEL}"
+            )
             current_user_content = [
                 {"type": "text", "text": text_for_history},
                 {"type": "image_url", "image_url": {"url": data_url}},
@@ -3307,14 +3666,14 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
         current_user_content = text_for_history
     
     # Собираем сообщения: система + история, а последнее пользовательское сообщение
-    # делаем мультимодальным, если пришло фото.
+    # дополняем описанием изображения (или делаем мультимодальным как резервный вариант).
     messages = [{"role": "system", "content": system_prompt}]
     for i, entry in enumerate(history):
         content = entry["content"]
         if (
             i == len(history) - 1
             and entry["role"] == "user"
-            and isinstance(current_user_content, list)
+            and current_user_content != text_for_history
         ):
             content = current_user_content
         messages.append({"role": entry["role"], "content": content})
@@ -3322,17 +3681,8 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     try:
         log_ai(uid, user_message, "..." + (" [с фото]" if image_bytes else ""))
         
-        # Запрос напрямую к OpenRouter без посредничества g4f
-        if openrouter_client is None:
-            log_err("AI", f"OpenRouter client not initialized for user={uid}")
-            return "AI сервис временно недоступен. Попробуйте позже."
-        
-        response = openrouter_client.chat.completions.create(
-            model="tencent/hy3-free",  # Указываем конкретную бесплатную модель
-            messages=messages
-        )
-        
-        answer = response.choices[0].message.content
+        # Единая точка выхода: WORK_TYPE=1 → OpenRouter, WORK_TYPE=2 → второй API
+        answer = ai_chat_completion(CHAT_MODEL, messages)
         if answer is None or not str(answer).strip():
             log_err("AI", f"Empty response for user={uid}")
             return "Не получилось сформировать ответ. Попробуй ещё раз."
@@ -3913,38 +4263,82 @@ def _get_image_attachment(message: types.Message):
     if message.reply_to_message:
         candidates.append(message.reply_to_message)
 
+    log_debug(
+        f"IMG search: content_type={message.content_type}, "
+        f"has_own_photo={bool(message.photo)}, "
+        f"is_reply={bool(message.reply_to_message)}, "
+        f"reply_content_type={message.reply_to_message.content_type if message.reply_to_message else None}"
+    )
+
     for msg in candidates:
         if msg.photo:
-            return msg.photo[-1].file_id, "image/jpeg"
+            file_id = msg.photo[-1].file_id
+            log_debug(f"IMG search: FOUND photo file_id={file_id}")
+            return file_id, "image/jpeg"
 
     for msg in candidates:
         if msg.document and (msg.document.mime_type or "").startswith("image/"):
+            log_debug(f"IMG search: FOUND image-document file_id={msg.document.file_id}")
             return msg.document.file_id, msg.document.mime_type
 
     for msg in candidates:
         if msg.sticker:
+            log_debug(f"IMG search: FOUND sticker file_id={msg.sticker.file_id}")
             return msg.sticker.file_id, "image/png"
 
+    log_debug("IMG search: NO image attachment found")
     return None, None
 
 
 def _download_photo(file_id: str) -> Optional[bytes]:
-    """Скачать файл (фото/документ/стикер) по file_id в байты."""
+    """Скачать файл (фото/документ/стикер) по file_id.
+
+    Файл сначала сохраняется во временную папку temp/ рядом с bot.py,
+    затем его байты читаются оттуда, а временный файл удаляется.
+    """
+    tmp_path = None
     try:
         file_info = bot.get_file(file_id)
-        return bot.download_file(file_info.file_path)
+        if not file_info or not file_info.file_path:
+            log_err("IMG_DOWNLOAD", f"Telegram returned empty file_path for file_id={file_id}")
+            return None
+        ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
+        tmp_path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex}{ext}")
+        with open(tmp_path, "wb") as f:
+            downloaded = bot.download_file(file_info.file_path)
+            # download_file может вернуть BytesIO либо raw-байты — приводим к bytes
+            data = downloaded.getvalue() if hasattr(downloaded, "getvalue") else downloaded
+            f.write(data)
+        size = os.path.getsize(tmp_path)
+        log_debug(f"IMG: saved {size} bytes to temp file {tmp_path}")
+        with open(tmp_path, "rb") as f:
+            result = f.read()
+        return result
     except Exception as e:
         log_err("IMG_DOWNLOAD", f"Error downloading file {file_id}: {e}")
         return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+                log_debug(f"IMG: removed temp file {tmp_path}")
+            except OSError as rm_e:
+                log_err("IMG_DOWNLOAD", f"Failed to remove temp file {tmp_path}: {rm_e}")
 
 
 def _get_image_bytes_from_message(message: types.Message) -> Optional[bytes]:
     """Скачать байты изображения из сообщения (или из сообщения, на которое отвечают),
     чтобы передать его ИИ. Возвращает None, если изображения нет."""
-    file_id, _mime = _get_image_attachment(message)
+    file_id, mime = _get_image_attachment(message)
     if not file_id:
         return None
-    return _download_photo(file_id)
+    log_debug(f"AI image: found attachment file_id={file_id}, mime={mime}, downloading via temp/")
+    data = _download_photo(file_id)
+    if data is None:
+        log_debug("AI image: download FAILED — continuing without image")
+    else:
+        log_debug(f"AI image: downloaded OK ({len(data)} bytes)")
+    return data
 
 
 def _image_to_data_url(image_bytes: bytes) -> str:
@@ -4592,21 +4986,21 @@ def cmd_yatb(message: types.Message):
     def _slavic_reply():
         try:
             set_reply_context(message)
-            if openrouter_client is None:
+            if WORK_TYPE != 2 and openrouter_client is None:
                 bot.edit_message_text("❌ Ошибка: OpenRouter не настроен.", message.chat.id, wait_msg.message_id)
                 return
 
             # Минимальный точечный промпт
             prompt = "Переделай текст на старославянский (древнерусский) лад, используя 'азь есмь', 'ъ', 'ь', 'вѣ' и былинные обороты. Если есть мат — сделай его сочным древним ругательством. Выдай только перевод, без пояснений."
 
-            res = openrouter_client.chat.completions.create(
-                model="tencent/hy3-free",
-                messages=[
+            ans = ai_chat_completion(
+                CHAT_MODEL,
+                [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": source_text}
-                ]
-            )
-            ans = res.choices[0].message.content.strip()
+                ],
+                debug_tag="YATB",
+            ).strip()
             bot.delete_message(message.chat.id, wait_msg.message_id)
             bot.reply_to(message, ans if ans else "Не удалось получить ответ.")
         except Exception as e:
@@ -5911,6 +6305,15 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
     if roulette_plays > 0:
         survival_rate = f"{round((roulette_plays - roulette_deaths) / roulette_plays * 100, 1)}%"
 
+    # Считаем реальные суммы из таблиц активности (а не только из stats),
+    # чтобы цифры в /stats всегда совпадали с топами и графиками.
+    bot_msgs = sum(c for _, c in get_daily_activity(target_uid))
+    chat_msgs = sum(c for _, c in get_daily_chat_activity(target_uid))
+    total_msgs = max(int(stats.get("messages", 0) or 0), bot_msgs + chat_msgs)
+
+    def _fmt_num(n: int) -> str:
+        return f"{n:,}".replace(",", " ")
+
     clan_text = f"🏷 Клан: <b>{clan['name']}</b> (реп. {clan['reputation']})" if clan else "🏷 Клан: <i>не состоит</i>"
 
     awards_text = ""
@@ -5926,16 +6329,16 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
         f"🎭 Роль: <b>{current_role}</b>\n"
         f"{clan_text}\n"
         f"💀 Статус: {'Мёртв' if is_user_dead(target_uid) else 'Жив'}\n\n"
-        f"🚬 Окурки: <b>{cigs}</b>\n"
-        f"💰 Рубли: <b>{rubles}₽</b>\n"
-        f"🚬 Сигареты: <b>{real_cigs}</b>\n\n"
-        f"💬 Сообщений (всего): <b>{stats.get('messages', 0)}</b>\n"
-        f"🤖 С ботом: <b>{sum(c for _, c in get_daily_activity(target_uid))}</b>\n"
-        f"💭 В чате: <b>{sum(c for _, c in get_daily_chat_activity(target_uid))}</b>\n"
-        f"⚙️ Команд: <b>{stats.get('commands', 0)}</b>\n"
-        f"🖼 Картинок: <b>{stats.get('images', 0)}</b>\n"
-        f"🚬 Выкурено: <b>{stats.get('smokes', 0)}</b>\n"
-        f"🎰 Рулеток: <b>{roulette_plays}</b> (выжил в {survival_rate})"
+        f"🚬 Окурки: <b>{_fmt_num(cigs)}</b>\n"
+        f"💰 Рубли: <b>{_fmt_num(rubles)}₽</b>\n"
+        f"🚬 Сигареты: <b>{_fmt_num(real_cigs)}</b>\n\n"
+        f"💬 Сообщений всего: <b>{_fmt_num(total_msgs)}</b>\n"
+        f"   ├─ 🤖 С ботом: <b>{_fmt_num(bot_msgs)}</b>\n"
+        f"   └─ 💭 В чате: <b>{_fmt_num(chat_msgs)}</b>\n"
+        f"⚙️ Команд: <b>{_fmt_num(int(stats.get('commands', 0)))}</b>\n"
+        f"🖼 Картинок: <b>{_fmt_num(int(stats.get('images', 0)))}</b>\n"
+        f"🚬 Выкурено: <b>{_fmt_num(int(stats.get('smokes', 0)))}</b>\n"
+        f"🎰 Рулеток: <b>{_fmt_num(roulette_plays)}</b> (выжил в {survival_rate})"
         f"{first_msg_text}"
         f"{awards_text}"
     )
@@ -5948,12 +6351,12 @@ def cmd_stats(message: types.Message):
     increment_stat(uid, "commands")
     log_cmd(uid, username, "stats")
 
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or message.caption or "").split(maxsplit=1)
     target_uid = uid
     owner_label = "Твоя статистика"
 
     # Priority 1: reply to a message → show that user's stats
-    if message.reply_to_message and not message.reply_to_message.from_user.is_bot:
+    if message.reply_to_message and message.reply_to_message.from_user and not message.reply_to_message.from_user.is_bot:
         target_user = message.reply_to_message.from_user
         target_uid = str(target_user.id)
         owner_label = get_display_name(target_user)
@@ -5962,7 +6365,6 @@ def cmd_stats(message: types.Message):
             update_username(target_uid, target_user.username)
         log_cmd(uid, username, "stats", f"target={target_uid}")
     # Priority 2: /stats {username}
-        # Priority 2: /stats {username}
     elif len(parts) >= 2 and parts[1].strip():
         username_query = parts[1].strip().lstrip("@").lower()
         
@@ -5979,7 +6381,12 @@ def cmd_stats(message: types.Message):
         else:
             bot.reply_to(message, f"Пользователь @{username_query} не найден в базе бота.")
             return
-    stats_text = _build_stats_text(target_uid, owner_label)
+    try:
+        stats_text = _build_stats_text(target_uid, owner_label)
+    except Exception as e:
+        log_err("STATS", f"Failed to build stats for target={target_uid}: {e}")
+        bot.reply_to(message, "❌ Не удалось получить статистику. Попробуй позже.")
+        return
 
     wait_msg = bot.reply_to(message, "📊 Генерирую график общительности...")
 
@@ -5988,14 +6395,30 @@ def cmd_stats(message: types.Message):
         graph_bytes = generate_activity_graph(target_uid)
         try:
             bot.delete_message(message.chat.id, wait_msg.message_id)
-        except:
+        except Exception:
             pass
 
+        sent = False
         if graph_bytes:
-            bot.send_photo(message.chat.id, graph_bytes, caption=stats_text, reply_to_message_id=message.message_id)
-        else:
+            try:
+                bot.send_photo(
+                    message.chat.id, graph_bytes, caption=stats_text, parse_mode="HTML",
+                    reply_to_message_id=message.message_id,
+                    message_thread_id=get_message_thread_id(message),
+                )
+                sent = True
+            except Exception as e:
+                log_err("STATS", f"Failed to send stats photo: {e}")
+        if not sent:
             stats_text_no_graph = stats_text + "\n\n<i>График появится, как только пользователь начнёт проявлять активность в чате.</i>"
-            bot.reply_to(message, stats_text_no_graph)
+            try:
+                bot.reply_to(message, stats_text_no_graph, parse_mode="HTML")
+            except Exception as e:
+                log_err("STATS", f"Failed to send stats text: {e}")
+                try:
+                    bot.reply_to(message, re.sub(r"</?(b|i|u|s|code|pre)>", "", stats_text_no_graph))
+                except Exception:
+                    pass
 
     threading.Thread(target=_send_stats, daemon=True).start()
 
@@ -9762,14 +10185,10 @@ def _is_plain_message(message: types.Message) -> bool:
     content_types=["text", "photo", "document", "sticker"],
 )
 def handle_text(message: types.Message):
-    register_chat(message.chat.id)
+    # Регистрация/учёт сообщения уже выполнен в count_all_chat_messages,
+    # который срабатывает на ВСЕ входящие сообщения — здесь только контекст и логика ответов.
     uid = get_uid(message)
-    track_chat_member(message.chat.id, message.from_user)
-    increment_stat(uid, "messages")
-    set_first_message_if_null(uid)
-
-    if message.from_user.username:
-        update_username(uid, message.from_user.username)
+    set_reply_context(message)
 
     # RP first — must not depend on should_respond or random quote
     if try_rp_action(message):
@@ -9777,8 +10196,6 @@ def handle_text(message: types.Message):
 
     if should_respond(message):
         track_daily_activity(uid)
-    else:
-        track_daily_chat_activity(uid, message.chat.id)
 
     maybe_send_random_quote(message)
 
@@ -9827,6 +10244,10 @@ def handle_text(message: types.Message):
     # Изображение для ИИ: фото, прикреплённое к тексту сообщения,
     # либо фото/картинка-документ/стикер в сообщении, на которое отвечают.
     ai_image_bytes: Optional[bytes] = _get_image_bytes_from_message(message)
+    log_debug(
+        f"handle_text: user={uid}, text={'yes' if user_text else 'no'}, "
+        f"image={'yes (' + str(len(ai_image_bytes)) + ' bytes)' if ai_image_bytes else 'no'}"
+    )
 
     # Если нет ни текста, ни изображения — обращаться к ИИ не с чем.
     if not user_text and ai_image_bytes is None:
@@ -9846,7 +10267,7 @@ def handle_text(message: types.Message):
                 bot.delete_message(message.chat.id, wait_msg.message_id)
             except Exception:
                 pass
-            bot.reply_to(message, answer)
+            send_ai_answer(message, answer)
         except Exception as e:
             log_err("AI", f"Reply thread failed for user={uid}: {e}")
             try:

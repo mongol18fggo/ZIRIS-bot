@@ -9,6 +9,7 @@ __pycache__/
 *.log
 *.tmp
 *.swp
+temp/
 
 # Environment
 .env
