@@ -3265,6 +3265,13 @@ def get_system_prompt(role_key: str) -> str:
     return role.get("prompt", "Ты полезный ассистент.")
 
 def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> str:
+    """Отправить сообщение ИИ.
+
+    Если переданы байты изображения (фото прикреплено к тексту сообщения либо
+    пользователь ответил на фото), оно передаётся модели в формате OpenAI
+    мультимодального сообщения:
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    """
     role_key = get_user_role(uid)
     base_system_prompt = get_system_prompt(role_key)
     
@@ -3276,19 +3283,28 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     system_prompt = f"Текущий собеседник (username): {username}\n\n{base_system_prompt}"
     
     # Сохраняем в историю чистый текст (без base64-картинок, чтобы не раздувать контекст)
-    history = append_history(uid, "user", user_message)
+    text_for_history = (user_message or "").strip() or "[изображение без подписи]"
+    history = append_history(uid, "user", text_for_history)
     
     # Формируем содержимое текущего пользовательского сообщения.
     # Если есть фото — отдаём ИИ в формате OpenAI мультимодального сообщения:
     # {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
     if image_bytes is not None:
-        data_url = _image_to_data_url(image_bytes)
-        current_user_content = [
-            {"type": "text", "text": user_message or "Что изображено на этой фотографии?"},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ]
+        try:
+            data_url = _image_to_data_url(image_bytes)
+        except Exception as e:
+            log_err("AI", f"Failed to encode image for user={uid}: {e}")
+            data_url = None
+
+        if data_url:
+            current_user_content = [
+                {"type": "text", "text": text_for_history},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]
+        else:
+            current_user_content = text_for_history
     else:
-        current_user_content = user_message
+        current_user_content = text_for_history
     
     # Собираем сообщения: система + история, а последнее пользовательское сообщение
     # делаем мультимодальным, если пришло фото.
@@ -3298,7 +3314,7 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
         if (
             i == len(history) - 1
             and entry["role"] == "user"
-            and image_bytes is not None
+            and isinstance(current_user_content, list)
         ):
             content = current_user_content
         messages.append({"role": entry["role"], "content": content})
@@ -3825,26 +3841,95 @@ def create_meme(image_bytes: bytes, top_text: str = "", bottom_text: str = "") -
         return None
 
 def _command_is(message: types.Message, command: str) -> bool:
-    """Проверяет, что текст/подпись сообщения — именно эта команда (/команда или /команда@бот)."""
+    """Проверяет, что текст/подпись сообщения — именно эта команда (/команда или /команда@бот).
+
+    Работает и для фото, прикреплённого к команде: в таком случае команда
+    находится в caption (подписи) сообщения, а не в text.
+    """
     text = (message.text or message.caption or "").strip()
     if not text:
         return False
+    # Убираем упоминание бота внутри команды: "/meme@mybot ..." -> "/meme ..."
+    first_word = text.split(None, 1)[0]
+    if "@" in first_word:
+        cmd_name, mentioned_bot = first_word[1:].split("@", 1)
+        try:
+            bot_username = (bot.get_me().username or "").lower()
+        except Exception:
+            bot_username = ""
+        # Если упоминается другой бот — это не наша команда
+        if bot_username and mentioned_bot.lower() != bot_username:
+            return False
+        text = f"/{cmd_name}" + text[len(first_word):]
     word = text.split(None, 1)[0]
     return word == f"/{command}" or word.startswith(f"/{command}@")
 
 
-def _get_photo_size(message: types.Message):
-    """Вернуть наибольший размер фото: либо прикреплённое к自身 сообщению (подпись-команда),
-    либо фото в сообщении, на которое отвечают."""
+def _get_message_photo(message: types.Message):
+    """Вернуть наибольшее фото самого сообщения (прикреплено к тексту/команде)."""
     if message.photo:
         return message.photo[-1]
+    return None
+
+
+def _get_reply_photo(message: types.Message):
+    """Вернуть наибольшее фото в сообщении, на которое отвечает пользователь."""
     if message.reply_to_message and message.reply_to_message.photo:
         return message.reply_to_message.photo[-1]
     return None
 
 
+def _get_photo_size(message: types.Message):
+    """Вернуть наибольшее фото: сначала прикреплённое к самому сообщению
+    (фото с подписью-командой), затем фото в сообщении, на которое отвечают."""
+    photo = _get_message_photo(message)
+    if photo:
+        return photo
+    return _get_reply_photo(message)
+
+
+def _guess_mime_type(data: bytes) -> str:
+    """Определить MIME-тип изображения по его байтам (для data URL)."""
+    try:
+        img = Image.open(io.BytesIO(data))
+        fmt = (img.format or "").upper()
+    except Exception:
+        fmt = ""
+    if fmt in ("GIF", "WEBP", "PNG"):
+        return {"GIF": "image/gif", "WEBP": "image/webp", "PNG": "image/png"}[fmt]
+    return "image/jpeg"
+
+
+def _get_image_attachment(message: types.Message):
+    """Найти изображение, связанное с сообщением, и вернуть (file_id, mime_type).
+
+    Приоритет поиска:
+      1) фото, прикреплённое к самому сообщению (подпись-текст или подпись-команда);
+      2) фото в сообщении, на которое пользователь ответил;
+      3) изображение, отправленное документом (сам ответ или исходное сообщение);
+      4) стикер (PNG).
+    """
+    candidates = [message]
+    if message.reply_to_message:
+        candidates.append(message.reply_to_message)
+
+    for msg in candidates:
+        if msg.photo:
+            return msg.photo[-1].file_id, "image/jpeg"
+
+    for msg in candidates:
+        if msg.document and (msg.document.mime_type or "").startswith("image/"):
+            return msg.document.file_id, msg.document.mime_type
+
+    for msg in candidates:
+        if msg.sticker:
+            return msg.sticker.file_id, "image/png"
+
+    return None, None
+
+
 def _download_photo(file_id: str) -> Optional[bytes]:
-    """Скачать фото по file_id в байты."""
+    """Скачать файл (фото/документ/стикер) по file_id в байты."""
     try:
         file_info = bot.get_file(file_id)
         return bot.download_file(file_info.file_path)
@@ -3853,18 +3938,49 @@ def _download_photo(file_id: str) -> Optional[bytes]:
         return None
 
 
+def _get_image_bytes_from_message(message: types.Message) -> Optional[bytes]:
+    """Скачать байты изображения из сообщения (или из сообщения, на которое отвечают),
+    чтобы передать его ИИ. Возвращает None, если изображения нет."""
+    file_id, _mime = _get_image_attachment(message)
+    if not file_id:
+        return None
+    return _download_photo(file_id)
+
+
 def _image_to_data_url(image_bytes: bytes) -> str:
-    """Перевести байты изображения в строку data:image/jpeg;base64,... для передачи ИИ."""
+    """Перевести байты изображения в строку data:image/jpeg;base64,<...> для передачи ИИ.
+
+    Изображение нормализуется в JPEG (альфа-канал убирается), большие стороны
+    уменьшаются, чтобы не превысить лимиты запроса к API.
+    """
+    max_side = 1280
+    jpeg_bytes = image_bytes
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        img = img.convert("RGB")
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        if max(img.size) > max_side:
+            img.thumbnail((max_side, max_side), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         jpeg_bytes = buf.getvalue()
     except Exception:
         jpeg_bytes = image_bytes
+
+    mime = _guess_mime_type(jpeg_bytes)
+    if mime == "image/png":
+        # PNG c альфа-каналом конвертируем в JPEG — модели стабильнее его принимают
+        try:
+            img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            jpeg_bytes = buf.getvalue()
+            mime = "image/jpeg"
+        except Exception:
+            pass
+
     b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-    return f"data:image/jpeg;base64,{b64}"
+    return f"data:{mime};base64,{b64}"
 
 
 def apply_image_effect(message: types.Message, mode: str):
@@ -9604,7 +9720,8 @@ def should_respond(message: types.Message) -> bool:
     if not is_group(message):
         return True
 
-    text_lower = (message.text or "").lower().strip()
+    # Учитываем и подпись к фото — текст может быть в caption
+    text_lower = ((message.text or "") or (message.caption or "")).lower().strip()
     words = set(text_lower.split())
     if words & TRIGGER_WORDS:
         return True
@@ -9625,14 +9742,25 @@ def send_welcome(message):
     bot.reply_to(message, "🥛 Вы осеменили зыриса. 🥛")
 
 def extract_clean_text(message: types.Message) -> str:
-    text = message.text or ""
+    # Для фото с подписью текст лежит в caption, а не в text
+    text = message.text or message.caption or ""
     bot_info = bot.get_me()
     if bot_info.username:
         text = text.replace(f"@{bot_info.username}", "").strip()
     return text
 
 
-@bot.message_handler(func=lambda m: m.content_type == "text" and not (m.text or "").startswith("/"), content_types=["text"])
+def _is_plain_message(message: types.Message) -> bool:
+    """Обычное сообщение (не команда): текст либо фото/документ с подписью без слэша."""
+    if (message.text or "").lstrip().startswith("/") or (message.caption or "").lstrip().startswith("/"):
+        return False
+    return message.content_type in ("text", "photo", "document", "sticker")
+
+
+@bot.message_handler(
+    func=_is_plain_message,
+    content_types=["text", "photo", "document", "sticker"],
+)
 def handle_text(message: types.Message):
     register_chat(message.chat.id)
     uid = get_uid(message)
@@ -9678,7 +9806,7 @@ def handle_text(message: types.Message):
 
     username = message.from_user.username or message.from_user.first_name or "unknown"
 
-    text_lower = (message.text or "").lower().strip()
+    text_lower = ((message.text or "") or (message.caption or "")).lower().strip()
     words = set(text_lower.split())
 
     if words & TRIGGER_WORDS:
@@ -9695,15 +9823,16 @@ def handle_text(message: types.Message):
         return
 
     user_text = extract_clean_text(message)
-    if not user_text:
+
+    # Изображение для ИИ: фото, прикреплённое к тексту сообщения,
+    # либо фото/картинка-документ/стикер в сообщении, на которое отвечают.
+    ai_image_bytes: Optional[bytes] = _get_image_bytes_from_message(message)
+
+    # Если нет ни текста, ни изображения — обращаться к ИИ не с чем.
+    if not user_text and ai_image_bytes is None:
         return
 
-    # Изображение для ИИ: ответ на фотографию (message.reply_to_message.photo)
-    ai_image_bytes: Optional[bytes] = None
-    if message.reply_to_message and message.reply_to_message.photo:
-        ai_image_bytes = _download_photo(message.reply_to_message.photo[-1].file_id)
-
-    log_cmd(uid, username, "chat", user_text[:80])
+    log_cmd(uid, username, "chat", (user_text or "[фото без подписи]")[:80])
     wait_msg = bot.reply_to(message, f"Думаю... подожди {AI_DELAY} сек.")
     bot.send_chat_action(message.chat.id, "typing")
 
