@@ -108,6 +108,7 @@ import random
 import re
 import threading
 import time
+import uuid
 import warnings
 from collections import deque
 from datetime import datetime, date
@@ -177,11 +178,20 @@ def log_err(category: str, error: str):
 def log_info(category: str, message: str):
     log("INFO", category, message)
 
+DEBUG = os.environ.get("DEBUG", "1") not in ("0", "false", "False")
+
+def log_debug(message: str):
+    """Отладочный лог (см. переменную окружения DEBUG)."""
+    if DEBUG:
+        log("DEBUG", "DBG", message)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Config & Initialization
 # ═══════════════════════════════════════════════════════════════════════════════
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMP_DIR = os.path.join(BASE_DIR, "temp")  # сюда сохраняем скачанные фото перед обработкой
+os.makedirs(TEMP_DIR, exist_ok=True)
 START_TIME = datetime.now()
 BOT_READY_AT = time.time()
 
@@ -3299,6 +3309,7 @@ def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
 
     try:
         log_info("VISION", f"Requesting image description from {VISION_MODEL} for user={uid}")
+        log_debug(f"VISION -> {VISION_MODEL}: sending image (data_url length={len(data_url)} chars)")
         response = openrouter_client.chat.completions.create(
             model=VISION_MODEL,
             messages=vision_messages,
@@ -3307,9 +3318,11 @@ def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
         if not description:
             log_err("VISION", f"Empty description returned for user={uid}")
             return None
+        log_debug(f"VISION <- {VISION_MODEL} answered:\n{description}")
         return description
     except Exception as e:
         log_err("VISION", f"Image description failed for user={uid}: {e}")
+        log_debug(f"VISION <- {VISION_MODEL} ERROR: {e}")
         return None
 
 
@@ -3335,6 +3348,11 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     # Сохраняем в историю чистый текст (без base64-картинок, чтобы не раздувать контекст)
     text_for_history = (user_message or "").strip() or "[изображение без подписи]"
     history = append_history(uid, "user", text_for_history)
+
+    log_debug(
+        f"AI: ask_ai called for user={uid}, has_image={image_bytes is not None}"
+        + (f", image_size={len(image_bytes)} bytes" if image_bytes else "")
+    )
     
     # Если есть фото — сначала отдаём его vision-модели deepseek/deepseek-v4.1-flash-free,
     # она досконально пересказывает изображение, и её пересказ подмешивается в промпт
@@ -3342,19 +3360,28 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     if image_bytes is not None:
         try:
             data_url = _image_to_data_url(image_bytes)
+            log_debug(f"AI: image encoded to data URL ({len(data_url)} chars)")
         except Exception as e:
             log_err("AI", f"Failed to encode image for user={uid}: {e}")
+            log_debug(f"AI: image encoding FAILED: {e}")
             data_url = None
 
         image_description = describe_image_for_ai(uid, data_url) if data_url else None
 
         if image_description:
+            log_debug(
+                f"AI: description from {VISION_MODEL} received ({len(image_description)} chars), "
+                f"appending it to the prompt for {CHAT_MODEL}"
+            )
             current_user_content = (
                 f"{text_for_history}\n\n"
                 f"[Описание изображения от vision-модели {VISION_MODEL}]:\n{image_description}"
             )
         elif data_url:
             # Если описание получить не удалось — пробуем отправить картинку напрямую
+            log_debug(
+                f"AI: no description from {VISION_MODEL} — falling back to multimodal request to {CHAT_MODEL}"
+            )
             current_user_content = [
                 {"type": "text", "text": text_for_history},
                 {"type": "image_url", "image_url": {"url": data_url}},
@@ -3971,38 +3998,82 @@ def _get_image_attachment(message: types.Message):
     if message.reply_to_message:
         candidates.append(message.reply_to_message)
 
+    log_debug(
+        f"IMG search: content_type={message.content_type}, "
+        f"has_own_photo={bool(message.photo)}, "
+        f"is_reply={bool(message.reply_to_message)}, "
+        f"reply_content_type={message.reply_to_message.content_type if message.reply_to_message else None}"
+    )
+
     for msg in candidates:
         if msg.photo:
-            return msg.photo[-1].file_id, "image/jpeg"
+            file_id = msg.photo[-1].file_id
+            log_debug(f"IMG search: FOUND photo file_id={file_id}")
+            return file_id, "image/jpeg"
 
     for msg in candidates:
         if msg.document and (msg.document.mime_type or "").startswith("image/"):
+            log_debug(f"IMG search: FOUND image-document file_id={msg.document.file_id}")
             return msg.document.file_id, msg.document.mime_type
 
     for msg in candidates:
         if msg.sticker:
+            log_debug(f"IMG search: FOUND sticker file_id={msg.sticker.file_id}")
             return msg.sticker.file_id, "image/png"
 
+    log_debug("IMG search: NO image attachment found")
     return None, None
 
 
 def _download_photo(file_id: str) -> Optional[bytes]:
-    """Скачать файл (фото/документ/стикер) по file_id в байты."""
+    """Скачать файл (фото/документ/стикер) по file_id.
+
+    Файл сначала сохраняется во временную папку temp/ рядом с bot.py,
+    затем его байты читаются оттуда, а временный файл удаляется.
+    """
+    tmp_path = None
     try:
         file_info = bot.get_file(file_id)
-        return bot.download_file(file_info.file_path)
+        if not file_info or not file_info.file_path:
+            log_err("IMG_DOWNLOAD", f"Telegram returned empty file_path for file_id={file_id}")
+            return None
+        ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
+        tmp_path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex}{ext}")
+        with open(tmp_path, "wb") as f:
+            downloaded = bot.download_file(file_info.file_path)
+            # download_file может вернуть BytesIO либо raw-байты — приводим к bytes
+            data = downloaded.getvalue() if hasattr(downloaded, "getvalue") else downloaded
+            f.write(data)
+        size = os.path.getsize(tmp_path)
+        log_debug(f"IMG: saved {size} bytes to temp file {tmp_path}")
+        with open(tmp_path, "rb") as f:
+            result = f.read()
+        return result
     except Exception as e:
         log_err("IMG_DOWNLOAD", f"Error downloading file {file_id}: {e}")
         return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+                log_debug(f"IMG: removed temp file {tmp_path}")
+            except OSError as rm_e:
+                log_err("IMG_DOWNLOAD", f"Failed to remove temp file {tmp_path}: {rm_e}")
 
 
 def _get_image_bytes_from_message(message: types.Message) -> Optional[bytes]:
     """Скачать байты изображения из сообщения (или из сообщения, на которое отвечают),
     чтобы передать его ИИ. Возвращает None, если изображения нет."""
-    file_id, _mime = _get_image_attachment(message)
+    file_id, mime = _get_image_attachment(message)
     if not file_id:
         return None
-    return _download_photo(file_id)
+    log_debug(f"AI image: found attachment file_id={file_id}, mime={mime}, downloading via temp/")
+    data = _download_photo(file_id)
+    if data is None:
+        log_debug("AI image: download FAILED — continuing without image")
+    else:
+        log_debug(f"AI image: downloaded OK ({len(data)} bytes)")
+    return data
 
 
 def _image_to_data_url(image_bytes: bytes) -> str:
@@ -9885,6 +9956,10 @@ def handle_text(message: types.Message):
     # Изображение для ИИ: фото, прикреплённое к тексту сообщения,
     # либо фото/картинка-документ/стикер в сообщении, на которое отвечают.
     ai_image_bytes: Optional[bytes] = _get_image_bytes_from_message(message)
+    log_debug(
+        f"handle_text: user={uid}, text={'yes' if user_text else 'no'}, "
+        f"image={'yes (' + str(len(ai_image_bytes)) + ' bytes)' if ai_image_bytes else 'no'}"
+    )
 
     # Если нет ни текста, ни изображения — обращаться к ИИ не с чем.
     if not user_text and ai_image_bytes is None:
