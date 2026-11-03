@@ -30,11 +30,18 @@ Uses PostgreSQL for data persistence (configure in config.json)
 #   * Общий топ (/top_chat) снова строится по полю stats->>'messages' —
 #     количество сообщений пользователя именно в этом чате (люди из чата).
 # 03.11.2026 — Сохранение статистики между перезапусками:
-#   * Отменён сброс счётчиков при старте (reset_all_activity_counters_on_startup
-#     больше не вызывается) — вся накопленная статистика сохраняется в БД.
-#   * Сообщения, отправленные ДО текущего запуска бота, по-прежнему не учитываются
-#     (фильтр is_message_from_start по времени отправки в handle_text), но старые
-#     данные, посчитанные в предыдущие сессии, из БД не удаляются.
+#   * Сброс счётчиков при старте УДАЛЁН (функция reset_all_activity_counters_on_startup
+#     заменена на mark_bot_start_time_in_db) — вся накопленная статистика хранится в БД
+#     и переживает перезапуски бота.
+#   * Сообщения, отправленные ДО текущего запуска бота, не учитываются
+#     (фильтр is_message_from_start по времени отправки в handle_text); время старта
+#     фиксируется при запуске и сохраняется в таблице bot_state (key='last_start_ts').
+# 03.11.2026 — Режимы работы ИИ (WORK_TYPE):
+#   * WORK_TYPE = 1 — прежняя логика через OpenRouter (VISION_MODEL / CHAT_MODEL).
+#   * WORK_TYPE = 2 — новый режим: весь ИИ (кроме генерации картинок) идёт через
+#     https://api.reformboss.com/v1/chat/completions, ключ из поля "TWO_API" в
+#     config.json, модели TWO_MODEL (ответы) и TWO_VISION (описание фото).
+#     Двухэтапный конвейер с изображением сохранён: vision-описание -> основной ответ.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -865,9 +872,9 @@ except Exception as e:
     # Continue anyway - bot will fail gracefully on DB operations
 
 # 03.11.2026: сообщения, отправленные ДО запуска бота, не учитываются
-# (фильтр по времени is_message_from_start в handle_text).
+# (фильтр по времени is_message_from_start в handle_text, порог BOT_START_TS).
 # Счётчики в БД при этом НЕ сбрасываются — накопленная статистика сохраняется
-# между перезапусками (reset_all_activity_counters_on_startup намеренно не вызывается).
+# между перезапусками; время старта фиксируется mark_bot_start_time_in_db().
 
 # Initialize bot and AI client
 BOT_MSG_HISTORY: dict[int, deque] = {}
@@ -3766,24 +3773,33 @@ def is_message_from_start(message: types.Message) -> bool:
     return ts == 0 or ts >= BOT_START_TS
 
 
-def reset_all_activity_counters_on_startup() -> None:
-    """При запуске обнуляет счётчики сообщений у всех известных пользователей.
+def mark_bot_start_time_in_db() -> int:
+    """Фиксирует время запуска бота (в памяти и в БД, таблица bot_state).
 
-    Бот считает только те сообщения, что были отправлены пока он работает;
-    всё накопленное до этого момента (и в daily_activity, и в
-    daily_chat_activity, и в stats.messages) стирается одной операцией.
+    Статистика между перезапусками НЕ сбрасывается — всё, что было посчитано
+    ранее, остаётся в БД. Старые сообщения из истории Telegram (отправленные
+    до текущего запуска) не учитываются повторно: фильтр is_message_from_start
+    сравнивает date сообщения с BOT_START_TS.
     """
+    global BOT_START_TS
+    ts = int(time.time())
+    BOT_START_TS = ts
     try:
-        db_execute("DELETE FROM daily_activity")
-        db_execute("DELETE FROM daily_chat_activity")
-        # stats — колонка JSONB; на случай старых схем (JSON) приведение безопасно
         db_execute(
-            "UPDATE users SET stats = jsonb_set(stats::jsonb, '{messages}', '0')::jsonb "
-            "WHERE COALESCE((stats::jsonb->>'messages')::int, 0) > 0"
+            """CREATE TABLE IF NOT EXISTS bot_state (
+                   key   TEXT PRIMARY KEY,
+                   value TEXT NOT NULL
+               )"""
         )
-        log_info("STATS", "Activity counters reset on startup (counting only from now).")
+        db_execute(
+            """INSERT INTO bot_state (key, value) VALUES ('last_start_ts', %s)
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+            (str(ts),),
+        )
     except Exception as e:
-        log_err("STATS", f"Failed to reset activity counters on startup: {e}")
+        log_err("STATS", f"Failed to save bot start time to DB: {e}")
+    log_info("STATS", f"Bot start time fixed: {ts} (previous stats kept in DB).")
+    return ts
 
 
 def is_group(message: types.Message) -> bool:
@@ -10373,6 +10389,7 @@ if __name__ == "__main__":
     log_info("CONFIG", f"AI_DELAY: {AI_DELAY}s")
     log_info("CONFIG", f"Admins: {list(ADMIN_USERNAMES) if ADMIN_USERNAMES else 'none configured'}")
     log_info("CONFIG", f"Database: {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    mark_bot_start_time_in_db()  # фиксируем время старта; счётчики НЕ сбрасываем
 
     def preload_tts():
         log_info("TTS", "Preloading Silero TTS model...")
