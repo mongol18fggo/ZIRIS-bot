@@ -26,6 +26,22 @@ Uses PostgreSQL for data persistence (configure in config.json)
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN CONFIGURATION - Edit these values
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# ── РЕЖИМ РАБОТЫ ИИ ──────────────────────────────────────────────────────────
+# WORK_TYPE = 1 — старый режим: все запросы ИИ идут через OpenRouter
+#               (https://api.orcarouter.ai/v1/, ключ "openrouter_api_key" в config.json),
+#               модели VISION_MODEL / CHAT_MODEL.
+# WORK_TYPE = 2 — новый режим: весь ИИ (кроме генерации картинок — она не меняется)
+#               работает через второй API (https://api.reformboss.com/v1/chat/completions),
+#               API-ключ берётся из поля "TWO_API" в config.json (или env TWO_API_KEY),
+#               используются модели TWO_VISION (описание фото) и TWO_MODEL (ответ).
+WORK_TYPE = 2
+
+# Настройки второго API (используются только при WORK_TYPE = 2)
+TWO_API_URL = "https://api.reformboss.com/v1/chat/completions"
+TWO_MODEL = "qwen-plus"                       # основная модель для ответов
+TWO_VISION = "qwen-vl-max"                    # vision-модель для описания изображений
+
 # Перечислите здесь ID тех, кого нужно полностью игнорировать
 THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ] 
 BOT_TOKEN = ""  # Set via config.json or BOT_TOKEN env var
@@ -133,6 +149,8 @@ import warnings
 from collections import deque
 from datetime import datetime, date
 from typing import Optional
+import urllib.request
+from urllib.request import Request, urlopen
 
 import psycopg2
 from psycopg2 import pool
@@ -998,6 +1016,94 @@ def _get_openrouter_client():
     )
 
 openrouter_client = _get_openrouter_client()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Второй API (WORK_TYPE = 2): reformboss chat/completions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_two_api_key() -> str:
+    """API-ключ второго режима работы ИИ: из config.json (поле TWO_API) или env."""
+    config = load_config()
+    return (
+        config.get("TWO_API")
+        or config.get("two_api")
+        or os.getenv("TWO_API_KEY")
+        or os.getenv("IISHKO_API_KEY")
+        or ""
+    )
+
+
+def _build_proxy_opener():
+    """Если в боте настроен прокси (PROXY_URL) — используем его и для urllib-запросов."""
+    if not PROXY_URL:
+        return None
+    proxy_url = PROXY_URL if "://" in PROXY_URL else f"http://{PROXY_URL}"
+    return build_opener(
+        ProxyHandler({"http": proxy_url, "https": proxy_url})
+    )
+
+
+def two_chat_completion(model: str, messages: list, timeout: int = 120) -> str:
+    """Запрос к второму API (api.reformboss.com) по схеме OpenAI chat/completions.
+
+    Используется при WORK_TYPE = 2 для всей логики ИИ (кроме генерации картинок).
+    Возвращает текст ответа модели; при ошибке бросает исключение.
+    """
+    api_key = _get_two_api_key()
+    if not api_key:
+        raise RuntimeError("TWO_API key not found in config.json")
+
+    body = json.dumps({"model": model, "messages": messages}).encode()
+    req = Request(
+        TWO_API_URL,
+        data=body,
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+        },
+    )
+    opener = _build_proxy_opener()
+    if opener is not None:
+        with opener.open(req, timeout=timeout) as r:
+            payload = json.load(r)
+    else:
+        with urlopen(req, timeout=timeout) as r:
+            payload = json.load(r)
+    content = payload["choices"][0]["message"]["content"]
+    if content is None or not str(content).strip():
+        raise RuntimeError("Empty response from TWO API")
+    return str(content).strip()
+
+
+def ai_chat_completion(model_type1: str, messages: list, debug_tag: str = "AI") -> str:
+    """Единая точка выхода ИИ-логики (кроме генерации картинок).
+
+    При WORK_TYPE = 2 запрос идёт во второй API (модель выбирается автоматически:
+    TWO_MODEL для чата, TWO_VISION для vision-запросов), иначе — через OpenRouter.
+    """
+    if WORK_TYPE == 2:
+        if model_type1 == VISION_MODEL:
+            model = TWO_VISION
+        elif model_type1 == CHAT_MODEL:
+            model = TWO_MODEL
+        else:
+            model = model_type1
+        log_debug(f"{debug_tag}: WORK_TYPE=2 → TWO API ({TWO_API_URL}), model={model}")
+        return two_chat_completion(model=model, messages=messages)
+
+    if openrouter_client is None:
+        raise RuntimeError("OpenRouter client not initialized")
+    log_debug(f"{debug_tag}: WORK_TYPE=1 → OpenRouter, model={model_type1}")
+    response = openrouter_client.chat.completions.create(
+        model=model_type1,
+        messages=messages,
+    )
+    content = response.choices[0].message.content
+    if content is None or not str(content).strip():
+        raise RuntimeError("Empty response from OpenRouter")
+    return str(content).strip()
+
 
 @bot.message_handler(func=lambda m: m.from_user and m.from_user.id in THIS_MEN_HATE_FUN, content_types=['text', 'photo', 'voice', 'document', 'animation'])
 def blacklisted_user_filter(message: types.Message):
@@ -3449,12 +3555,14 @@ CHAT_MODEL = "tencent/hy3-free"                      # Вторая модель
 
 
 def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
-    """Попросить vision-модель (deepseek/deepseek-v4.1-flash-free) досконально
-    описать изображение, переданное в виде data URL.
+    """Попросить vision-модель досконально описать изображение, переданное в виде data URL.
+
+    При WORK_TYPE = 1 — deepseek/deepseek-v4.1-flash-free через OpenRouter,
+    при WORK_TYPE = 2 — TWO_VISION через второй API (ai_chat_completion сам выберет).
 
     Возвращает текст описания или None, если описание получить не удалось.
     """
-    if openrouter_client is None:
+    if WORK_TYPE != 2 and openrouter_client is None:
         log_err("VISION", f"OpenRouter client not initialized for user={uid}")
         return None
 
@@ -3480,11 +3588,7 @@ def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
     try:
         log_info("VISION", f"Requesting image description from {VISION_MODEL} for user={uid}")
         log_debug(f"VISION -> {VISION_MODEL}: sending image (data_url length={len(data_url)} chars)")
-        response = openrouter_client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=vision_messages,
-        )
-        description = (response.choices[0].message.content or "").strip()
+        description = ai_chat_completion(VISION_MODEL, vision_messages, debug_tag="VISION").strip()
         if not description:
             log_err("VISION", f"Empty description returned for user={uid}")
             return None
@@ -3577,17 +3681,8 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     try:
         log_ai(uid, user_message, "..." + (" [с фото]" if image_bytes else ""))
         
-        # Запрос напрямую к OpenRouter без посредничества g4f
-        if openrouter_client is None:
-            log_err("AI", f"OpenRouter client not initialized for user={uid}")
-            return "AI сервис временно недоступен. Попробуйте позже."
-        
-        response = openrouter_client.chat.completions.create(
-            model=CHAT_MODEL,  # Указываем конкретную бесплатную модель
-            messages=messages
-        )
-        
-        answer = response.choices[0].message.content
+        # Единая точка выхода: WORK_TYPE=1 → OpenRouter, WORK_TYPE=2 → второй API
+        answer = ai_chat_completion(CHAT_MODEL, messages)
         if answer is None or not str(answer).strip():
             log_err("AI", f"Empty response for user={uid}")
             return "Не получилось сформировать ответ. Попробуй ещё раз."
@@ -4891,21 +4986,21 @@ def cmd_yatb(message: types.Message):
     def _slavic_reply():
         try:
             set_reply_context(message)
-            if openrouter_client is None:
+            if WORK_TYPE != 2 and openrouter_client is None:
                 bot.edit_message_text("❌ Ошибка: OpenRouter не настроен.", message.chat.id, wait_msg.message_id)
                 return
 
             # Минимальный точечный промпт
             prompt = "Переделай текст на старославянский (древнерусский) лад, используя 'азь есмь', 'ъ', 'ь', 'вѣ' и былинные обороты. Если есть мат — сделай его сочным древним ругательством. Выдай только перевод, без пояснений."
 
-            res = openrouter_client.chat.completions.create(
-                model="tencent/hy3-free",
-                messages=[
+            ans = ai_chat_completion(
+                CHAT_MODEL,
+                [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": source_text}
-                ]
-            )
-            ans = res.choices[0].message.content.strip()
+                ],
+                debug_tag="YATB",
+            ).strip()
             bot.delete_message(message.chat.id, wait_msg.message_id)
             bot.reply_to(message, ans if ans else "Не удалось получить ответ.")
         except Exception as e:
