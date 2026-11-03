@@ -6361,7 +6361,7 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
     # чтобы цифры в /stats всегда совпадали с топами и графиками.
     bot_msgs = sum(c for _, c in get_daily_activity(target_uid))
     chat_msgs = sum(c for _, c in get_daily_chat_activity(target_uid))
-    total_msgs = max(int(stats.get("messages", 0) or 0), bot_msgs + chat_msgs)
+    total_msgs = int(stats.get("messages", 0) or 0) + bot_msgs
 
     def _fmt_num(n: int) -> str:
         return f"{n:,}".replace(",", " ")
