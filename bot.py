@@ -1145,8 +1145,17 @@ def count_all_chat_messages(message: types.Message):
     счётчик сообщений этого пользователя в этом чате. Работает даже тогда,
     когда бот на сообщение не отвечает. Команды (/start и т.п.) из счётчика
     исключены — они считаются отдельно как команды.
+
+    ВАЖНО: сообщения, отправленные ДО запуска бота (старая история, которую
+    getUpdates может подтянуть при старте), НЕ учитываются вообще.
     """
     try:
+        if not is_message_from_start(message):
+            log_debug(
+                f"MSG_COUNT: skip OLD message id={message.message_id} "
+                f"(sent at {_msg_ts(message)}, bot started at {BOT_START_TS})"
+            )
+            return
         user = message.from_user
         if not user or user.is_bot:
             return
@@ -1293,6 +1302,24 @@ def get_user_role(uid: str) -> str:
 
 def set_user_role(uid: str, role: str) -> None:
     update_user(uid, role=role)
+
+
+def reset_activity_counters(uid: str) -> None:
+    """Обнуляет накопленную статистику сообщений пользователя.
+
+    Вызывается один раз при запуске бота для всех известных пользователей:
+    сообщения, отправленные до старта, учитываться не должны — счётчики
+    начинаются с нуля (бот считает только то, что происходит пока он работает).
+    """
+    try:
+        db_execute("DELETE FROM daily_activity WHERE user_id = %s", (str(uid),))
+        db_execute("DELETE FROM daily_chat_activity WHERE user_id = %s", (str(uid),))
+        stats = get_stats(str(uid))
+        if int(stats.get("messages", 0) or 0) > 0:
+            stats["messages"] = 0
+            update_user(str(uid), stats=json.dumps(stats))
+    except Exception as e:
+        log_err("DB", f"Failed to reset activity counters for {uid}: {e}")
 
 def get_cigarettes(uid: str) -> int:
     user = get_or_create_user(uid)
@@ -3730,6 +3757,53 @@ def roles_keyboard(uid: str) -> types.InlineKeyboardMarkup:
 
 def get_uid(message: types.Message) -> str:
     return str(message.from_user.id)
+
+
+# ── Учёт сообщений ТОЛЬКО с момента запуска бота ─────────────────────────────
+BOT_START_TS = int(time.time())  # unix-время старта процесса бота
+
+
+def _msg_ts(message: types.Message) -> int:
+    """Unix-время отправки сообщения (сравниваем ts с ts — часовой пояс не важен)."""
+    try:
+        d = getattr(message, "date", None)
+        if isinstance(d, datetime):
+            return int(d.timestamp())
+        return int(d or 0)
+    except Exception:
+        return 0
+
+
+def is_message_from_start(message: types.Message) -> bool:
+    """True, если сообщение отправлено НЕ РАНЬШЕ момента запуска бота.
+
+    При старте getUpdates может подтянуть старые (необработанные) сообщения из
+    истории — они не должны попадать ни в статистику, ни в ответы ИИ.
+    """
+    ts = _msg_ts(message)
+    # ts == 0 — нет данных о дате: считаем свежим, чтобы не ломать учёт
+    return ts == 0 or ts >= BOT_START_TS
+
+
+def reset_all_activity_counters_on_startup() -> None:
+    """При запуске обнуляет счётчики сообщений у всех известных пользователей.
+
+    Бот считает только те сообщения, что были отправлены пока он работает;
+    всё накопленное до этого момента (и в daily_activity, и в
+    daily_chat_activity, и в stats.messages) стирается одной операцией.
+    """
+    try:
+        db_execute("DELETE FROM daily_activity")
+        db_execute("DELETE FROM daily_chat_activity")
+        # stats — колонка JSONB; на случай старых схем (JSON) приведение безопасно
+        db_execute(
+            "UPDATE users SET stats = jsonb_set(stats::jsonb, '{messages}', '0')::jsonb "
+            "WHERE COALESCE((stats::jsonb->>'messages')::int, 0) > 0"
+        )
+        log_info("STATS", "Activity counters reset on startup (counting only from now).")
+    except Exception as e:
+        log_err("STATS", f"Failed to reset activity counters on startup: {e}")
+
 
 def is_group(message: types.Message) -> bool:
     return message.chat.type in ("group", "supergroup")
@@ -10187,6 +10261,13 @@ def _is_plain_message(message: types.Message) -> bool:
 def handle_text(message: types.Message):
     # Регистрация/учёт сообщения уже выполнен в count_all_chat_messages,
     # который срабатывает на ВСЕ входящие сообщения — здесь только контекст и логика ответов.
+    # Старые сообщения (из истории, отправленные до запуска бота) полностью игнорируются.
+    if not is_message_from_start(message):
+        log_debug(
+            f"handle_text: skip OLD message id={message.message_id} "
+            f"(sent at {_msg_ts(message)}, bot started at {BOT_START_TS})"
+        )
+        return
     uid = get_uid(message)
     set_reply_context(message)
 
