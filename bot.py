@@ -21,6 +21,14 @@ Uses PostgreSQL for data persistence (configure in config.json)
 #   * Бот считает ВООБЩЕ ВСЕ сообщения в чате (текст, фото, видео, стикеры,
 #     документы и т.д.) для всех пользователей, даже если бот на них не отвечает.
 #   * Топ по общительности (/top_chat) включает только людей из текущего чата.
+# 03.11.2026 — Отказ от подчёта сообщений через отдельный хендлер (бот лагал):
+#   * Удалён хендлер count_all_chat_messages, который срабатывал на каждое
+#     сообщение со всеми content_types (тяжелый путь: регистрация пользователя,
+#     чата, участника и запись в БД на каждый апдейт).
+#   * Учёт сообщений оставлен только там, где бот их всё равно обрабатывает
+#     (handle_text): increment_stat(uid, "messages") + track_daily_chat_activity.
+#   * Общий топ (/top_chat) снова строится по полю stats->>'messages' —
+#     количество сообщений пользователя именно в этом чате (люди из чата).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -850,6 +858,14 @@ except Exception as e:
     log_info("CONFIG", "Please configure your database in config.json before running the bot")
     # Continue anyway - bot will fail gracefully on DB operations
 
+# 03.11.2026: бот считает только сообщения, отправленные пока он работает —
+# при старте обнуляем все счётчики активности (daily_activity, daily_chat_activity
+# и stats->messages), чтобы старые данные не попадали в /stats и топы.
+try:
+    reset_all_activity_counters_on_startup()
+except Exception as e:
+    log_err("STARTUP", f"Failed to reset activity counters: {e}")
+
 # Initialize bot and AI client
 BOT_MSG_HISTORY: dict[int, deque] = {}
 BOT_MSG_HISTORY_MAX = 200
@@ -1129,52 +1145,12 @@ def _reply_context_callback(_bot_instance, call: types.CallbackQuery):
     set_reply_context_from_call(call)
 
 
-ALL_MESSAGE_TYPES = [
-    "text", "audio", "document", "animation", "game", "photo", "sticker",
-    "video", "voice", "video_note", "contact", "location", "venue",
-    "poll", "dice", "story",
-]
-
-
-@bot.message_handler(content_types=ALL_MESSAGE_TYPES)
-def count_all_chat_messages(message: types.Message):
-    """Считает ВООБЩЕ ВСЕ сообщения в чате для статистики общительности.
-
-    Срабатывает на каждое входящее сообщение (текст, фото, видео, стикеры,
-    документы и т.д.), регистрирует автора как участника чата и увеличивает
-    счётчик сообщений этого пользователя в этом чате. Работает даже тогда,
-    когда бот на сообщение не отвечает. Команды (/start и т.п.) из счётчика
-    исключены — они считаются отдельно как команды.
-
-    ВАЖНО: сообщения, отправленные ДО запуска бота (старая история, которую
-    getUpdates может подтянуть при старте), НЕ учитываются вообще.
-    """
-    try:
-        if not is_message_from_start(message):
-            log_debug(
-                f"MSG_COUNT: skip OLD message id={message.message_id} "
-                f"(sent at {_msg_ts(message)}, bot started at {BOT_START_TS})"
-            )
-            return
-        user = message.from_user
-        if not user or user.is_bot:
-            return
-        uid = str(user.id)
-        get_or_create_user(uid)
-        if user.username:
-            update_username(uid, user.username)
-        set_first_message_if_null(uid)
-        register_chat(message.chat.id)
-        track_chat_member(message.chat.id, user)
-
-        raw_text = (message.text or "") + " " + (message.caption or "")
-        if raw_text.lstrip().startswith("/"):
-            return  # это команда — её считают командные хендлеры
-
-        increment_stat(uid, "messages")
-        track_daily_chat_activity(uid, message.chat.id)
-    except Exception as e:
-        log_err("MSG_COUNT", f"Failed to count chat message: {e}")
+# NOTE (03.11.2026): отдельный хендлер-счётчик сообщений на ВСЕ content_types
+# (count_all_chat_messages / ALL_MESSAGE_TYPES) удалён — он вызывал лаги,
+# т.к. на каждый входящий апдейт шёл тяжёлый путь в БД (get_or_create_user,
+# register_chat, track_chat_member, increment_stat с полным read-modify-write
+# JSONB). Учёт сообщений теперь ведётся только там, где бот их всё равно
+# обрабатывает — в handle_text (см. ниже): stats["messages"] + daily_chat_activity.
 
 # Silero model
 silero_model = None
@@ -1808,6 +1784,11 @@ def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None
 
     Для топа по общительности в чате ('chat') в список попадают ТОЛЬКО пользователи,
     которые пишут в этом чате (проверка по таблице chat_members).
+
+    03.11.2026: общий топ снова строится по количеству сообщений пользователя
+    (поле stats->>'messages') — как работало раньше, без отдельного подчёта через
+    daily_chat_activity. В топ попадают только люди из текущего чата
+    (фильтр по таблице chat_members).
     """
     if table == "bot":
         results = db_execute(
@@ -1820,19 +1801,16 @@ def get_top_talkative(table: str, limit: int = 10, chat_id: Optional[int] = None
     else:
         if chat_id is not None:
             query = (
-                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
-                "FROM daily_chat_activity da "
-                "JOIN users u ON u.id = da.user_id "
-                "WHERE da.chat_id = %s AND da.user_id IN "
-                "(SELECT user_id FROM chat_members WHERE chat_id = %s) "
-                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+                "SELECT u.id, COALESCE((u.stats->>'messages')::bigint, 0) AS total, u.username "
+                "FROM users u "
+                "WHERE u.id IN (SELECT user_id FROM chat_members WHERE chat_id = %s) "
+                "ORDER BY total DESC LIMIT %s"
             )
-            params: tuple = (chat_id, chat_id, limit)
+            params: tuple = (chat_id, limit)
         else:
             query = (
-                "SELECT da.user_id, SUM(da.message_count) AS total, u.username "
-                "FROM daily_chat_activity da JOIN users u ON u.id = da.user_id "
-                "GROUP BY da.user_id, u.username ORDER BY total DESC LIMIT %s"
+                "SELECT u.id, COALESCE((u.stats->>'messages')::bigint, 0) AS total, u.username "
+                "FROM users u ORDER BY total DESC LIMIT %s"
             )
             params = (limit,)
         results = db_execute(query, params, fetch=True)
@@ -10259,8 +10237,6 @@ def _is_plain_message(message: types.Message) -> bool:
     content_types=["text", "photo", "document", "sticker"],
 )
 def handle_text(message: types.Message):
-    # Регистрация/учёт сообщения уже выполнен в count_all_chat_messages,
-    # который срабатывает на ВСЕ входящие сообщения — здесь только контекст и логика ответов.
     # Старые сообщения (из истории, отправленные до запуска бота) полностью игнорируются.
     if not is_message_from_start(message):
         log_debug(
@@ -10270,6 +10246,26 @@ def handle_text(message: types.Message):
         return
     uid = get_uid(message)
     set_reply_context(message)
+
+    # ── Учёт сообщения (03.11.2026) ──
+    # Раньше для этого был отдельный хендлер на ВСЕ content_types, из-за которого
+    # бот лагал. Теперь сообщение засчитывается прямо здесь — в stats["messages"]
+    # и в daily_chat_activity (для графика общительности). Команды сюда не попадают
+    # (_is_plain_message их отсекает), они считаются как "commands".
+    try:
+        user = message.from_user
+        if user and not user.is_bot:
+            uid_s = str(user.id)
+            get_or_create_user(uid_s)          # нужен, чтобы пользователь попал в топ
+            if user.username:
+                update_username(uid_s, user.username)
+            set_first_message_if_null(uid_s)
+            register_chat(message.chat.id)
+            track_chat_member(message.chat.id, user)  # фильтр "люди из этого чата" для /top_chat
+            increment_stat(uid_s, "messages")
+            track_daily_chat_activity(uid_s, message.chat.id)
+    except Exception as e:
+        log_err("MSG_COUNT", f"Failed to count chat message: {e}")
 
     # RP first — must not depend on should_respond or random quote
     if try_rp_action(message):
