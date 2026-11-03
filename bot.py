@@ -36,6 +36,10 @@ Uses PostgreSQL for data persistence (configure in config.json)
 #   * Сообщения, отправленные ДО текущего запуска бота, не учитываются
 #     (фильтр is_message_from_start по времени отправки в handle_text); время старта
 #     фиксируется при запуске и сохраняется в таблице bot_state (key='last_start_ts').
+#   * Реальный сброс старой истории: перед стартом polling вызывается
+#     skip_old_updates_before_start() — getUpdates(offset=-1) подтверждает все
+#     накопленные апдейты, и они НЕ доставляются хендлерам. Логи «skip OLD»
+#     убраны — старые сообщения игнорируются молча (устранены лаги при старте).
 # 03.11.2026 — Режимы работы ИИ (WORK_TYPE):
 #   * WORK_TYPE = 1 — прежняя логика через OpenRouter (VISION_MODEL / CHAT_MODEL).
 #   * WORK_TYPE = 2 — новый режим: весь ИИ (кроме генерации картинок) идёт через
@@ -3771,6 +3775,21 @@ def is_message_from_start(message: types.Message) -> bool:
     ts = _msg_ts(message)
     # ts == 0 — нет данных о дате: считаем свежим, чтобы не ломать учёт
     return ts == 0 or ts >= BOT_START_TS
+
+
+def skip_old_updates_before_start():
+    """Сбрасывает очередь getUpdates Telegram ДО старта polling.
+
+    Запрос getUpdates с offset=-1 подтверждает получение всех накопленных
+    апдейтов — старая история не будет доставлена хендлерам вообще.
+    Так бот РЕАЛЬНО скипает старые сообщения, а не получает пачку при
+    запуске, не гоняет её через все хендлеры и не лагает.
+    """
+    try:
+        updates = bot.get_updates(offset=-1, timeout=0)
+        log_info("STARTUP", f"Old updates queue flushed ({len(updates) if updates else 0} skipped).")
+    except Exception as e:
+        log_err("STARTUP", f"Failed to flush old updates (non-fatal): {e}")
 
 
 def mark_bot_start_time_in_db() -> int:
@@ -10256,12 +10275,9 @@ def _is_plain_message(message: types.Message) -> bool:
     content_types=["text", "photo", "document", "sticker"],
 )
 def handle_text(message: types.Message):
-    # Старые сообщения (из истории, отправленные до запуска бота) полностью игнорируются.
+    # Старые сообщения (из истории, отправленные до запуска бота) игнорируются
+    # молча — без логов. Основной сброс истории делается в skip_old_updates_before_start().
     if not is_message_from_start(message):
-        log_debug(
-            f"handle_text: skip OLD message id={message.message_id} "
-            f"(sent at {_msg_ts(message)}, bot started at {BOT_START_TS})"
-        )
         return
     uid = get_uid(message)
     set_reply_context(message)
@@ -10390,6 +10406,7 @@ if __name__ == "__main__":
     log_info("CONFIG", f"Admins: {list(ADMIN_USERNAMES) if ADMIN_USERNAMES else 'none configured'}")
     log_info("CONFIG", f"Database: {DB_HOST}:{DB_PORT}/{DB_NAME}")
     mark_bot_start_time_in_db()  # фиксируем время старта; счётчики НЕ сбрасываем
+    skip_old_updates_before_start()  # молча сбрасываем старую историю ДО polling
 
     def preload_tts():
         log_info("TTS", "Preloading Silero TTS model...")
