@@ -3264,13 +3264,63 @@ def get_system_prompt(role_key: str) -> str:
     role = roles.get(role_key, roles.get("default", {}))
     return role.get("prompt", "Ты полезный ассистент.")
 
+VISION_MODEL = "deepseek/deepseek-v4.1-flash-free"  # Первая модель: подробно описывает изображение
+CHAT_MODEL = "tencent/hy3-free"                      # Вторая модель: отвечает на основе описания и истории
+
+
+def describe_image_for_ai(uid: str, data_url: str) -> Optional[str]:
+    """Попросить vision-модель (deepseek/deepseek-v4.1-flash-free) досконально
+    описать изображение, переданное в виде data URL.
+
+    Возвращает текст описания или None, если описание получить не удалось.
+    """
+    if openrouter_client is None:
+        log_err("VISION", f"OpenRouter client not initialized for user={uid}")
+        return None
+
+    vision_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — внимательный анализатор изображений. Опиши полученное изображение "
+                "максимально досконально: что на нём изображено, все объекты, людей, их действия, "
+                "выражения, одежду, расположение, фон, надписи и текст (перечисли его буквально), "
+                "цвета, стиль, атмосферу и любые мелкие детали. Отвечай подробным связным текстом на русском языке."
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Опиши это изображение максимально подробно:"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    try:
+        log_info("VISION", f"Requesting image description from {VISION_MODEL} for user={uid}")
+        response = openrouter_client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=vision_messages,
+        )
+        description = (response.choices[0].message.content or "").strip()
+        if not description:
+            log_err("VISION", f"Empty description returned for user={uid}")
+            return None
+        return description
+    except Exception as e:
+        log_err("VISION", f"Image description failed for user={uid}: {e}")
+        return None
+
+
 def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> str:
     """Отправить сообщение ИИ.
 
     Если переданы байты изображения (фото прикреплено к тексту сообщения либо
-    пользователь ответил на фото), оно передаётся модели в формате OpenAI
-    мультимодального сообщения:
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    пользователь ответил на фото), то сначала оно отправляется vision-модели
+    deepseek/deepseek-v4.1-flash-free, которая досконально пересказывает, что
+    на фото. Этот пересказ затем добавляется к сообщению пользователя и вместе
+    с историей чата передаётся основной модели Hy3 (tencent/hy3-free).
     """
     role_key = get_user_role(uid)
     base_system_prompt = get_system_prompt(role_key)
@@ -3286,9 +3336,9 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
     text_for_history = (user_message or "").strip() or "[изображение без подписи]"
     history = append_history(uid, "user", text_for_history)
     
-    # Формируем содержимое текущего пользовательского сообщения.
-    # Если есть фото — отдаём ИИ в формате OpenAI мультимодального сообщения:
-    # {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    # Если есть фото — сначала отдаём его vision-модели deepseek/deepseek-v4.1-flash-free,
+    # она досконально пересказывает изображение, и её пересказ подмешивается в промпт
+    # для основной модели Hy3 вместо самой картинки.
     if image_bytes is not None:
         try:
             data_url = _image_to_data_url(image_bytes)
@@ -3296,7 +3346,15 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
             log_err("AI", f"Failed to encode image for user={uid}: {e}")
             data_url = None
 
-        if data_url:
+        image_description = describe_image_for_ai(uid, data_url) if data_url else None
+
+        if image_description:
+            current_user_content = (
+                f"{text_for_history}\n\n"
+                f"[Описание изображения от vision-модели {VISION_MODEL}]:\n{image_description}"
+            )
+        elif data_url:
+            # Если описание получить не удалось — пробуем отправить картинку напрямую
             current_user_content = [
                 {"type": "text", "text": text_for_history},
                 {"type": "image_url", "image_url": {"url": data_url}},
@@ -3307,14 +3365,14 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
         current_user_content = text_for_history
     
     # Собираем сообщения: система + история, а последнее пользовательское сообщение
-    # делаем мультимодальным, если пришло фото.
+    # дополняем описанием изображения (или делаем мультимодальным как резервный вариант).
     messages = [{"role": "system", "content": system_prompt}]
     for i, entry in enumerate(history):
         content = entry["content"]
         if (
             i == len(history) - 1
             and entry["role"] == "user"
-            and isinstance(current_user_content, list)
+            and current_user_content != text_for_history
         ):
             content = current_user_content
         messages.append({"role": entry["role"], "content": content})
@@ -3328,7 +3386,7 @@ def ask_ai(uid: str, user_message: str, image_bytes: Optional[bytes] = None) -> 
             return "AI сервис временно недоступен. Попробуйте позже."
         
         response = openrouter_client.chat.completions.create(
-            model="tencent/hy3-free",  # Указываем конкретную бесплатную модель
+            model=CHAT_MODEL,  # Указываем конкретную бесплатную модель
             messages=messages
         )
         
