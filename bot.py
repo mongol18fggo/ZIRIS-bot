@@ -1504,11 +1504,13 @@ def format_alab_text(uid: str) -> str:
     )
 
 def alab_keyboard() -> types.InlineKeyboardMarkup:
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    rows = []
     for key, name in ALAB_STAT_NAMES.items():
-        markup.insert(types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"))
-        markup.insert(types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"))
-    return markup
+        rows.append([
+            types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"),
+            types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"),
+        ])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _aura_mult_for_battle(uid: str) -> float:
     """Множитель выигрыша ауры на батле: сила набора + луксмаксинг."""
@@ -10557,10 +10559,13 @@ def _resolve_user_by_username(username: str):
     return uid, disp
 
 def _battle_markup(bid: int) -> types.InlineKeyboardMarkup:
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.insert(types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"))
-    markup.insert(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"))
-    return markup
+    rows = [
+        [
+            types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"),
+            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"),
+        ]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 def _run_battle_rounds(challenger_uid: str, opponent_uid: str, chat_id: int, message_id: int, thread_id=None):
     """Симулирует раунды аура-батла; первый, чья аура превысит AURA_WIN_THRESHOLD, побеждает,
