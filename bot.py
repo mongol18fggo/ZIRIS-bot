@@ -500,6 +500,7 @@ def create_tables():
     ALTER TABLE users ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS aura INTEGER DEFAULT 0;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reputation INTEGER DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_aura_dance BIGINT DEFAULT 0;
 
     -- Aura Lab (аура-лаборатория): луксмаксинг, движения, сила набора ауры
     CREATE TABLE IF NOT EXISTS aura_lab (
@@ -1432,6 +1433,37 @@ def add_aura(uid: str, amount: int) -> int:
         (int(amount), uid), fetch=True, fetch_one=True
     )
     return int(row[0]) if row else 0
+
+# ── Кулдаун /aura: один танец в сутки ──
+AURA_DANCE_COOLDOWN_SEC = 24 * 60 * 60  # 1 день
+
+def _fmt_hms(seconds: int) -> str:
+    """Читает секунды в 'Xч Yм Zс' (без нулевых старших частей)."""
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if h:
+        parts.append(f"{h} ч")
+    if m or h:
+        parts.append(f"{m} мин")
+    parts.append(f"{s} с")
+    return " ".join(parts)
+
+def get_last_aura_dance(uid: str) -> int:
+    """Возвращает unix-время последнего танца в /aura (0 если не танцевал)."""
+    try:
+        row = db_execute("SELECT COALESCE(last_aura_dance, 0) FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
+        return int(row[0] or 0) if row else 0
+    except Exception as e:
+        log_err("AURA", f"get_last_aura_dance failed for {uid}: {e}")
+        return 0
+
+def set_last_aura_dance(uid: str, ts: int | None = None) -> None:
+    try:
+        db_execute("UPDATE users SET last_aura_dance = %s WHERE id = %s", (int(ts if ts is not None else time.time()), str(uid)))
+    except Exception as e:
+        log_err("AURA", f"set_last_aura_dance failed for {uid}: {e}")
 
 def get_reputation(uid: str) -> int:
     try:
@@ -4250,7 +4282,7 @@ COMMAND_LIST = [
     "/delremind - удалить напоминание",
     "/stats - статистика (своя или чужая, с графиком)",
     "/ab - вызвать человека на аура-батл (в ответ на сообщение или /ab username)",
-    "/aura - публично потанцевать под музыку: 50% +50 ауры / 50% -50 ауры",
+    "/aura - публично потанцевать под музыку: 50% +50 ауры / 50% -50 ауры (раз в сутки)",
     "/alab - аура-лаборатория: луксмаксинг, движения, сила набора ауры",
     "/plus - повысить репутацию человека на 1 (в ответ на сообщение)",
     "/minus - понизить репутацию человека на 1 (в ответ на сообщение)",
@@ -4272,7 +4304,7 @@ COMMAND_LIST = [
 
 AURA_COMMANDS = [
     "/ab - вызов на аура-батл (ответь на сообщение человека или /ab username)",
-    "/aura - публично танцуй под музыку: шанс 50% получить 50 ауры, иначе потерять 50",
+    "/aura - публично танцуй под музыку: шанс 50% получить 50 ауры, иначе потерять 50 (кулдаун — 1 день)",
     "/alab - аура-лаборатория: луксмаксинг, прокачка движений, сила набора ауры",
     "/plus (+ в ответ на сообщение) - репутация человека +1",
     "/minus (- в ответ на сообщение) - репутация человека -1",
@@ -10750,7 +10782,7 @@ def get_message_thread_id_from_id(chat_id: int, message_id: int):
 
 @bot.message_handler(commands=["aura"])
 def cmd_aura(message: types.Message):
-    """/aura — публично станцевать под музыку: 50% шанс получить +50 ауры, иначе -50."""
+    """/aura — публично станцевать под музыку: 50% шанс получить +50 ауры, иначе -50. Кулдаун — 1 день."""
     uid = get_uid(message)
     username = message.from_user.username or message.from_user.first_name or "unknown"
     increment_stat(uid, "commands")
@@ -10759,16 +10791,35 @@ def cmd_aura(message: types.Message):
     if uid in THIS_MEN_HATE_FUN_SET:
         return
 
+    # ── Суточный кулдаун ──
+    last_dance = get_last_aura_dance(uid)
+    now_ts = int(time.time())
+    elapsed = now_ts - last_dance
+    if last_dance and elapsed < AURA_DANCE_COOLDOWN_SEC:
+        remaining = AURA_DANCE_COOLDOWN_SEC - elapsed
+        try:
+            bot.reply_to(
+                message,
+                f"⏳ Ты уже танцевал сегодня! Следующий танец через <b>{_fmt_hms(remaining)}</b>.\n"
+                f"Аура фармится не чаще одного раза в сутки. 💃",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            log_err("AURA", f"cooldown send failed: {e}")
+        return
+
     chance = _aura_move_chance(uid)
     win = random.random() < chance
     delta = AURA_DANCE_AMOUNT if win else -AURA_DANCE_AMOUNT
     new_aura = add_aura(uid, delta)
+    set_last_aura_dance(uid, now_ts)
     disp = get_display_name(message.from_user)
     emoji = "🕺✨" if win else "😵‍💫💨"
     text = (
         f"{emoji} <b>{disp}</b> устроил{'' if message.from_user.first_name is None else ''} публичный танец под музыку!\n"
         f"{'Поймал вайб и заработал <b>+50</b> ауры.' if win else 'Оступился и потерял <b>-50</b> ауры.'}\n"
-        f"⚡ Текущая аура: <b>{new_aura}</b>"
+        f"⚡ Текущая аура: <b>{new_aura}</b>\n"
+        f"⏳ Следующий танец через <b>{_fmt_hms(AURA_DANCE_COOLDOWN_SEC)}</b>"
     )
     try:
         bot.reply_to(message, text, parse_mode="HTML")
