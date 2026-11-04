@@ -67,7 +67,9 @@ TWO_MODEL = "qwen-plus"                       # основная модель д
 TWO_VISION = "qwen-vl-max"                    # vision-модель для описания изображений
 
 # Перечислите здесь ID тех, кого нужно полностью игнорировать
-THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ] 
+THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ]
+# Множество строковых ID для проверок в аура-системе (uid там хранится как str)
+THIS_MEN_HATE_FUN_SET = {str(x) for x in THIS_MEN_HATE_FUN} 
 BOT_TOKEN = ""  # Set via config.json or BOT_TOKEN env var
 PROXY_URL = "45.38.107.97:6014"  # Set to None to disable proxy
 AI_DELAY = 2  # Seconds to wait before AI response
@@ -174,7 +176,7 @@ from collections import deque
 from datetime import datetime, date
 from typing import Optional
 import urllib.request
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
 import psycopg2
 from psycopg2 import pool
@@ -496,6 +498,30 @@ def create_tables():
     ALTER TABLE users ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMP DEFAULT NULL;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS crypto_balance REAL DEFAULT 0;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS aura INTEGER DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS reputation INTEGER DEFAULT 0;
+
+    -- Aura Lab (аура-лаборатория): луксмаксинг, движения, сила набора ауры
+    CREATE TABLE IF NOT EXISTS aura_lab (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        luxmaxing INTEGER NOT NULL DEFAULT 0,
+        moves INTEGER NOT NULL DEFAULT 0,
+        power INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Активные вызовы на аура-батл (/ab)
+    CREATE TABLE IF NOT EXISTS aura_battles (
+        id SERIAL PRIMARY KEY,
+        challenger_id TEXT NOT NULL,
+        opponent_id TEXT NOT NULL,
+        chat_id BIGINT NOT NULL,
+        message_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_aura_battles_pending
+        ON aura_battles (challenger_id, opponent_id) WHERE status = 'pending';
 
     -- Items table for user inventory
     CREATE TABLE IF NOT EXISTS user_items (
@@ -1232,10 +1258,11 @@ def get_or_create_user(uid: str) -> dict:
     """Get user from DB, create if not exists."""
     uid = str(uid)
     
-    # ДОБАВИЛИ hate_fun В КОНЕЦ ЗАПРОСА (теперь это 14-е поле, индекс 13)
+    # ДОБАВИЛИ hate_fun, aura, reputation В КОНЕЦ ЗАПРОСА (теперь это 14-16 поля, индексы 13-15)
     result = db_execute(
         "SELECT id, username, role, cigarettes, rubles, real_cigarettes, "
-        "clan_id, dead, last_trash, stats, awards, first_message_at, crypto_balance, hate_fun "
+        "clan_id, dead, last_trash, stats, awards, first_message_at, crypto_balance, hate_fun, "
+        "aura, reputation "
         "FROM users WHERE id = %s",
         (uid,), fetch=True, fetch_one=True
     )
@@ -1258,6 +1285,8 @@ def get_or_create_user(uid: str) -> dict:
             "first_message_at": result[11],
             "crypto_balance": float(result[12] or 0),
             "hate_fun": bool(result[13]), # Принудительно приводим к bool для стабильности
+            "aura": int(result[14] or 0),
+            "reputation": int(result[15] or 0),
         }
 
     # Create new user
@@ -1270,7 +1299,8 @@ def get_or_create_user(uid: str) -> dict:
     # ДОБАВИЛИ дефолтные crypto_balance и hate_fun в возврат, чтобы у новых юзеров не было KeyError в коде
     return {"id": uid, "username": "", "role": "default", "cigarettes": 0, "rubles": 0,
             "real_cigarettes": 0, "clan_id": None, "dead": False, "last_trash": 0,
-            "stats": default_stats, "awards": [], "first_message_at": None, "crypto_balance": 0.0, "hate_fun": False}
+            "stats": default_stats, "awards": [], "first_message_at": None, "crypto_balance": 0.0, "hate_fun": False,
+            "aura": 0, "reputation": 0}
 
 def update_user(uid: str, **kwargs) -> None:
     """Update user fields."""
@@ -1380,6 +1410,166 @@ def can_collect_trash(uid: str) -> tuple[bool, int]:
 
 def set_trash_time(uid: str) -> None:
     update_user(uid, last_trash=time.time())
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Aura / Reputation helpers (аура-батлы, /aura, /alab, +/- репутация)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_aura(uid: str) -> int:
+    try:
+        row = db_execute("SELECT aura FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        log_err("AURA", f"get_aura failed for {uid}: {e}")
+        return 0
+
+def add_aura(uid: str, amount: int) -> int:
+    """Атомарно меняет ауру (не уходит ниже 0). Возвращает новое значение."""
+    uid = str(uid)
+    get_or_create_user(uid)
+    row = db_execute(
+        "UPDATE users SET aura = GREATEST(COALESCE(aura, 0) + %s, 0) WHERE id = %s RETURNING aura",
+        (int(amount), uid), fetch=True, fetch_one=True
+    )
+    return int(row[0]) if row else 0
+
+def get_reputation(uid: str) -> int:
+    try:
+        row = db_execute("SELECT reputation FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        log_err("REP", f"get_reputation failed for {uid}: {e}")
+        return 0
+
+def add_reputation(uid: str, amount: int) -> int:
+    uid = str(uid)
+    get_or_create_user(uid)
+    row = db_execute(
+        "UPDATE users SET reputation = COALESCE(reputation, 0) + %s WHERE id = %s RETURNING reputation",
+        (int(amount), uid), fetch=True, fetch_one=True
+    )
+    return int(row[0]) if row else 0
+
+# ── Аура-лаборатория (/alab): луксмаксинг, движения, сила набора ауры ──
+
+ALAB_STAT_NAMES = {"lux": "✨ Луксмаксинг", "moves": "🕺 Движения", "power": "💪 Сила набора ауры"}
+ALAB_BUTT_COST = 25   # окурки за 1 уровень улучшения
+ALAB_CIG_COST = 1     # сигареты за 3 уровня улучшения
+
+def get_alab(uid: str) -> dict:
+    uid = str(uid)
+    get_or_create_user(uid)
+    row = db_execute(
+        "INSERT INTO aura_lab (user_id) VALUES (%s) "
+        "ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
+        (uid,), fetch=True, fetch_one=True
+    )
+    row = db_execute(
+        "SELECT luxmaxing, moves, power FROM aura_lab WHERE user_id = %s",
+        (uid,), fetch=True, fetch_one=True
+    )
+    if not row:
+        return {"lux": 0, "moves": 0, "power": 0}
+    return {"lux": int(row[0]), "moves": int(row[1]), "power": int(row[2])}
+
+def alab_upgrade(uid: str, stat_key: str, levels: int) -> Optional[dict]:
+    if stat_key not in ALAB_STAT_NAMES:
+        return None
+    col = {"lux": "luxmaxing", "moves": "moves", "power": "power"}[stat_key]
+    try:
+        db_execute(
+            f"INSERT INTO aura_lab (user_id, {col}) VALUES (%s, %s) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {col} = aura_lab.{col} + EXCLUDED.{col}, updated_at = CURRENT_TIMESTAMP",
+            (str(uid), int(levels)),
+        )
+        return get_alab(uid)
+    except Exception as e:
+        log_err("ALAB", f"upgrade failed for {uid}: {e}")
+        return None
+
+def format_alab_text(uid: str) -> str:
+    lab = get_alab(uid)
+    aura = get_aura(uid)
+    mult = 1.0 + 0.05 * lab["power"]
+    return (
+        f"🧬 <b>АУРА-ЛАБОРАТОРИЯ</b>\n\n"
+        f"⚡ Твоя аура: <b>{aura}</b> (до победы в батле — <b>500</b>)\n\n"
+        f"✨ <b>Луксмаксинг:</b> ур. <b>{lab['lux']}</b>\n"
+        f"   <i>Стиль, шик, холодный взгляд. Пассивно усиливает ауру, капающую с батлов (+2% за уровень).</i>\n"
+        f"🕺 <b>Движения:</b> ур. <b>{lab['moves']}</b>\n"
+        f"   <i>Танцы и флекс. Увеличивает шанс успеха в /aura (+2% за уровень).</i>\n"
+        f"💪 <b>Сила набора ауры:</b> ур. <b>{lab['power']}</b>\n"
+        f"   <i>Множитель выигрыша ауры на батлах: ×{mult:.2f}.</i>\n\n"
+        f"<i>Улучшения: 🚬 {ALAB_BUTT_COST} окурков = +1 уровень, 💵 {ALAB_CIG_COST} сигарета = +3 уровня.</i>"
+    )
+
+def alab_keyboard() -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for key, name in ALAB_STAT_NAMES.items():
+        markup.insert(types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"))
+        markup.insert(types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"))
+    return markup
+
+def _aura_mult_for_battle(uid: str) -> float:
+    """Множитель выигрыша ауры на батле: сила набора + луксмаксинг."""
+    lab = get_alab(uid)
+    return 1.0 + 0.05 * lab["power"] + 0.02 * lab["lux"]
+
+def _aura_move_chance(uid: str) -> float:
+    """Шанс успешного танца в /aura: 50% + 2% за уровень движений (макс. 75%)."""
+    lab = get_alab(uid)
+    return min(0.5 + 0.02 * lab["moves"], 0.75)
+
+def get_pending_battles_for(uid: str) -> list:
+    try:
+        return db_execute(
+            "SELECT id, challenger_id, opponent_id, chat_id, message_id FROM aura_battles "
+            "WHERE status = 'pending' AND (challenger_id = %s OR opponent_id = %s)",
+            (str(uid), str(uid)), fetch=True
+        ) or []
+    except Exception as e:
+        log_err("ABATTLE", f"get_pending failed: {e}")
+        return []
+
+def create_battle_challenge(challenger_id: str, opponent_id: str, chat_id: int, message_id: int) -> bool:
+    try:
+        db_execute(
+            "INSERT INTO aura_battles (challenger_id, opponent_id, chat_id, message_id) VALUES (%s, %s, %s, %s)",
+            (str(challenger_id), str(opponent_id), int(chat_id), int(message_id)),
+        )
+        return True
+    except Exception as e:
+        log_err("ABATTLE", f"create challenge failed: {e}")
+        return False
+
+def resolve_battle_request(bid: int) -> bool:
+    """Атомарно забирает pending-запрос (защита от двойного принятия). True — если запрос наш."""
+    try:
+        row = db_execute(
+            "UPDATE aura_battles SET status = 'accepted' WHERE id = %s AND status = 'pending' RETURNING id",
+            (int(bid),), fetch=True, fetch_one=True
+        )
+        return row is not None
+    except Exception as e:
+        log_err("ABATTLE", f"resolve request failed: {e}")
+        return False
+
+def close_battle(bid: int, status: str) -> None:
+    try:
+        db_execute("UPDATE aura_battles SET status = %s WHERE id = %s", (status, int(bid)))
+    except Exception as e:
+        log_err("ABATTLE", f"close battle failed: {e}")
+
+def get_battle_by_message(chat_id: int, message_id: int) -> Optional[tuple]:
+    try:
+        return db_execute(
+            "SELECT id, challenger_id, opponent_id FROM aura_battles "
+            "WHERE chat_id = %s AND message_id = %s AND status = 'pending'",
+            (int(chat_id), int(message_id)), fetch=True, fetch_one=True
+        )
+    except Exception as e:
+        log_err("ABATTLE", f"get_battle_by_message failed: {e}")
+        return None
 
 def get_stats(uid: str) -> dict:
     user = get_or_create_user(uid)
@@ -4056,6 +4246,11 @@ COMMAND_LIST = [
     "/reminders - список напоминаний",
     "/delremind - удалить напоминание",
     "/stats - статистика (своя или чужая, с графиком)",
+    "/ab - вызвать человека на аура-батл (в ответ на сообщение или /ab username)",
+    "/aura - публично потанцевать под музыку: 50% +50 ауры / 50% -50 ауры",
+    "/alab - аура-лаборатория: луксмаксинг, движения, сила набора ауры",
+    "/plus - повысить репутацию человека на 1 (в ответ на сообщение)",
+    "/minus - понизить репутацию человека на 1 (в ответ на сообщение)",
     "/top_chat - топ общительных в этом чате",
     "/top_bot - топ общительных с ботом",
     "/say - отправить сообщение без изменений",
@@ -4070,6 +4265,14 @@ COMMAND_LIST = [
     "/mines - игра Мины (ставка на окурки/рубли/сигареты)",
     "/cr - казино-рулетка (ставка на цвет или число)",
     "/bj - блэкджек (ставка на окурки/рубли/сигареты)",
+]
+
+AURA_COMMANDS = [
+    "/ab - вызов на аура-батл (ответь на сообщение человека или /ab username)",
+    "/aura - публично танцуй под музыку: шанс 50% получить 50 ауры, иначе потерять 50",
+    "/alab - аура-лаборатория: луксмаксинг, прокачка движений, сила набора ауры",
+    "/plus (+ в ответ на сообщение) - репутация человека +1",
+    "/minus (- в ответ на сообщение) - репутация человека -1",
 ]
 
 VIRUS_COMMANDS = [
@@ -4133,6 +4336,7 @@ def _format_sections(sections) -> str:
 def format_commands_part1() -> str:
     return _format_sections([
         ("Основное", COMMAND_LIST),
+        ("Аура-батлы", AURA_COMMANDS),
         ("Патогены", VIRUS_COMMANDS),
         ("Кланы", CLAN_COMMANDS),
         ("Экономика", ECONOMY_COMMANDS),
@@ -4631,6 +4835,9 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
         ("ihatefun", "Отключить реакции от бота"),
         ("join_clan", "Вступить в клан"),
         ("jpeg", "Ухудшить качество"),
+        ("ab", "Вызвать на аура-батл"),
+        ("alab", "Аура-лаборатория"),
+        ("aura", "Потанцевать за ауру"),
         ("lab", "Лаборатория вируса"),
         ("leaderboard", "Топ игроков"),
         ("leave_clan", "Покинуть клан"),
@@ -4734,6 +4941,9 @@ def get_start_text(page: int = 0, name: str = "друг") -> str:
         ("ihatefun", "Отключить реакции для бота"),
         ("join_clan", "Вступить в клан"),
         ("jpeg", "Ухудшить качество"),
+        ("ab", "Вызвать на аура-батл"),
+        ("alab", "Аура-лаборатория"),
+        ("aura", "Потанцевать за ауру"),
         ("lab", "Лаборатория вируса"),
         ("leaderboard", "Топ игроков"),
         ("leave_clan", "Покинуть клан"),
@@ -6132,12 +6342,7 @@ def cmd_translate(message: types.Message):
         set_reply_context(message)
         try:
             prompt = f"Translate the following Russian text to English. Reply ONLY with the translation.\n\n{text}"
-            response = ai_client.chat.completions.create(
-                model="",
-                messages=[{"role": "user", "content": prompt}],
-                web_search=False,
-            )
-            translation = response.choices[0].message.content.strip()
+            translation = ai_chat_completion(CHAT_MODEL, [{"role": "user", "content": prompt}], debug_tag="TRANSLATE")
             bot.delete_message(message.chat.id, wait_msg.message_id)
             bot.reply_to(message, f"🌐 <b>Перевод:</b>\n\n<i>Оригинал:</i> {text}\n<i>Перевод:</i> {translation}")
         except Exception as e:
@@ -6328,6 +6533,8 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
     cigs = get_cigarettes(target_uid)
     rubles = get_rubles(target_uid)
     real_cigs = get_real_cigarettes(target_uid)
+    aura_val = get_aura(target_uid)
+    rep_val = get_reputation(target_uid)
     role_key = get_user_role(target_uid)
     roles = get_all_roles(target_uid)
     current_role = roles.get(role_key, {}).get("name", "Обычный ассистент")
@@ -6367,6 +6574,8 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
         f"🎭 Роль: <b>{current_role}</b>\n"
         f"{clan_text}\n"
         f"💀 Статус: {'Мёртв' if is_user_dead(target_uid) else 'Жив'}\n\n"
+        f"⚡ Уровень ауры: <b>{_fmt_num(aura_val)}</b> (победа в батле на >500)\n"
+        f"⭐ Репутация: <b>{_fmt_num(rep_val)}</b>\n\n"
         f"🚬 Окурки: <b>{_fmt_num(cigs)}</b>\n"
         f"💰 Рубли: <b>{_fmt_num(rubles)}₽</b>\n"
         f"🚬 Сигареты: <b>{_fmt_num(real_cigs)}</b>\n\n"
@@ -9576,19 +9785,19 @@ def callback_shop_buy(call: types.CallbackQuery):
     
     # Check user balance
     if currency == "rubles":
-        user_rubles = get_user_rubles(uid)
+        user_rubles = get_rubles(uid)
         if user_rubles < price:
             bot.answer_callback_query(call.id, f"Недостаточно рублей! Нужно {price}, у тебя {user_rubles}", show_alert=True)
             return
         # Deduct rubles
-        set_user_rubles(uid, user_rubles - price)
+        add_rubles(uid, -price)
     elif currency in ("butts", "cigarettes"):
-        user_butts = get_user_cigarettes(uid)
+        user_butts = get_cigarettes(uid)
         if user_butts < price:
             bot.answer_callback_query(call.id, f"Недостаточно окурков! Нужно {price}, у тебя {user_butts}", show_alert=True)
             return
         # Deduct butts
-        set_user_cigarettes(uid, user_butts - price)
+        add_cigarettes(uid, -price)
     else:
         bot.answer_callback_query(call.id, "Неизвестная валюта.")
         return
@@ -10326,6 +10535,356 @@ def handle_text(message: types.Message):
 
     threading.Thread(target=_reply, daemon=True).start()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Aura Battles (/ab), /aura, /alab, Reputation (+/-, /plus, /minus)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+AURA_WIN_THRESHOLD = 500   # если аура одного перешагнет за 500 — он выигрывает, противник могнут
+AURA_DANCE_CHANCE = 0.5    # базовый шанс +50 ауры при танце (иначе -50)
+AURA_DANCE_AMOUNT = 50
+
+def _resolve_user_by_username(username: str):
+    """Возвращает (uid, display_name) по юзернейму или None."""
+    found = find_user_by_username(username)
+    if not found:
+        return None
+    uid = str(found["id"])
+    get_or_create_user(uid)
+    if found.get("username"):
+        update_username(uid, found["username"])
+    disp = f"@{found['username']}" if found.get("username") else f"user_{uid}"
+    return uid, disp
+
+def _battle_markup(bid: int) -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.insert(types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"))
+    markup.insert(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"))
+    return markup
+
+def _run_battle_rounds(challenger_uid: str, opponent_uid: str, chat_id: int, message_id: int, thread_id=None):
+    """Симулирует раунды аура-батла; первый, чья аура превысит AURA_WIN_THRESHOLD, побеждает,
+    проигравший становится мёртвым (нужен /revive)."""
+    try:
+        c_aura = get_aura(challenger_uid)
+        o_aura = get_aura(opponent_uid)
+        c_mult = _aura_mult_for_battle(challenger_uid)
+        o_mult = _aura_mult_for_battle(opponent_uid)
+        rounds_log = []
+        max_rounds = 60
+        for r in range(1, max_rounds + 1):
+            c_gain = random.randint(30, 90) * c_mult
+            o_gain = random.randint(30, 90) * o_mult
+            c_aura += int(c_gain)
+            o_aura += int(o_gain)
+            rounds_log.append(f"Раунд {r}: ⚡ {int(c_gain)} vs {int(o_gain)} ⚡")
+            if c_aura > AURA_WIN_THRESHOLD or o_aura > AURA_WIN_THRESHOLD:
+                break
+        winner_uid, loser_uid = (challenger_uid, opponent_uid) if c_aura >= o_aura else (opponent_uid, challenger_uid)
+        add_aura(winner_uid, c_aura - get_aura(winner_uid))
+        add_aura(loser_uid, o_aura - get_aura(loser_uid))
+        set_user_dead(loser_uid, True)
+        close_battle_by_message(chat_id, message_id)
+        w_disp = get_display_name_of_uid(winner_uid)
+        l_disp = get_display_name_of_uid(loser_uid)
+        text = (
+            f"⚔️ <b>АУРА-БАТЛ ОКОНЧЕН</b>\n\n"
+            f"🏆 Победитель: <b>{w_disp}</b> (аура {get_aura(winner_uid)})\n"
+            f"💀 Могнут: <b>{l_disp}</b> (аура {get_aura(loser_uid)})\n\n"
+            f"<i>Раунды:</i>\n" + "\n".join(rounds_log[-10:])
+        )
+        try:
+            bot.send_message(chat_id, text, parse_mode="HTML", reply_to_message_id=message_id, message_thread_id=thread_id)
+        except Exception as e:
+            log_err("ABATTLE", f"send result failed: {e}")
+    except Exception as e:
+        log_err("ABATTLE", f"battle rounds crashed: {e}")
+
+def get_display_name_of_uid(uid: str) -> str:
+    u = get_or_create_user(str(uid))
+    if u.get("username"):
+        return f"@{u['username']}"
+    return f"user_{uid}"
+
+def close_battle_by_message(chat_id: int, message_id: int) -> None:
+    b = get_battle_by_message(chat_id, message_id)
+    if b:
+        close_battle(int(b[0]), "finished")
+
+@bot.message_handler(commands=["ab"])
+def cmd_ab(message: types.Message):
+    """/ab — вызвать на батл того, кому отвечаешь; /ab username — вызвать по нику."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    log_cmd(uid, username, "ab")
+
+    if uid in THIS_MEN_HATE_FUN_SET:
+        return
+
+    target_uid = None
+    target_disp = None
+    parts = (message.text or "").split(maxsplit=1)
+    if message.reply_to_message and message.reply_to_message.from_user and not message.reply_to_message.from_user.is_bot:
+        tu = message.reply_to_message.from_user
+        target_uid = str(tu.id)
+        target_disp = get_display_name(tu)
+        get_or_create_user(target_uid)
+        if tu.username:
+            update_username(target_uid, tu.username)
+    elif len(parts) >= 2 and parts[1].strip():
+        resolved = _resolve_user_by_username(parts[1].strip().lstrip("@"))
+        if not resolved:
+            bot.reply_to(message, "Пользователь не найден в базе бота.")
+            return
+        target_uid, target_disp = resolved
+    else:
+        bot.reply_to(message, "Использование: ответь сообщением /ab человеку или напиши /ab username")
+        return
+
+    if target_uid == uid:
+        bot.reply_to(message, "Нельзя вызвать самого себя на батл 🤡")
+        return
+
+    already = get_pending_battles_for(uid)
+    for b in already:
+        if str(target_uid) in (str(b[1]), str(b[2])):
+            bot.reply_to(message, "Между вами уже есть незакрытый вызов на батл.")
+            return
+
+    ok = create_battle_challenge(uid, target_uid, message.chat.id, message.message_id)
+    if not ok:
+        bot.reply_to(message, "Не удалось создать вызов. Попробуй позже.")
+        return
+
+    ch_disp = get_display_name(message.from_user)
+    text = (
+        f"⚔️ <b>АУРА-БАТЛ</b>\n\n"
+        f"{ch_disp} вызывает {target_disp} на батл!\n"
+        f"Первый, чья аура превысит <b>{AURA_WIN_THRESHOLD}</b>, побеждает, а проигравший — могнут.\n\n"
+        f"<i>Ждём решения соперника…</i>"
+    )
+    bid_row = db_execute(
+        "SELECT id FROM aura_battles WHERE chat_id=%s AND message_id=%s AND status='pending' ORDER BY id DESC LIMIT 1",
+        (int(message.chat.id), int(message.message_id)), fetch=True, fetch_one=True
+    )
+    bid = int(bid_row[0]) if bid_row else 0
+    try:
+        sent = bot.send_message(
+            message.chat.id, text, parse_mode="HTML",
+            reply_to_message_id=message.message_id,
+            message_thread_id=get_message_thread_id(message),
+            reply_markup=_battle_markup(bid),
+        )
+        # обновим message_id вызова, чтобы кнопка была привязана к реальному сообщению
+        db_execute("UPDATE aura_battles SET message_id = %s WHERE id = %s", (int(sent.message_id), bid))
+    except Exception as e:
+        log_err("ABATTLE", f"send challenge failed: {e}")
+        close_battle(bid, "failed")
+        bot.reply_to(message, "Не удалось отправить вызов.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ab_yes:") or call.data.startswith("ab_no:"))
+def callback_ab_resolve(call: types.CallbackQuery):
+    uid = str(call.from_user.id)
+    action, bid_s = call.data.split(":", 1)
+    try:
+        bid = int(bid_s)
+    except Exception:
+        bot.answer_callback_query(call.id, "Некорректные данные.")
+        return
+
+    row = db_execute(
+        "SELECT challenger_id, opponent_id, chat_id, message_id FROM aura_battles WHERE id = %s AND status='pending'",
+        (bid,), fetch=True, fetch_one=True
+    )
+    if not row:
+        bot.answer_callback_query(call.id, "Этот вызов уже закрыт.")
+        return
+    challenger_id, opponent_id, chat_id, message_id = str(row[0]), str(row[1]), int(row[2]), int(row[3])
+    if uid != opponent_id:
+        bot.answer_callback_query(call.id, "Принять может только вызванный человек.", show_alert=True)
+        return
+
+    if action == "ab_no":
+        close_battle(bid, "declined")
+        bot.answer_callback_query(call.id, "Батл отклонён.")
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=f"❌ {get_display_name_of_uid(uid)} отклонил аура-батл."
+            )
+        except Exception:
+            pass
+        return
+
+    if not resolve_battle_request(bid):
+        bot.answer_callback_query(call.id, "Вызов уже был принят.")
+        return
+
+    bot.answer_callback_query(call.id, "Батл начался!")
+    try:
+        bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=f"⚔️ Батл принят! Начинаем обмен аурами…"
+        )
+    except Exception:
+        pass
+
+    threading.Thread(
+        target=_run_battle_rounds,
+        args=(challenger_id, opponent_id, chat_id, message_id, get_message_thread_id_from_id(chat_id, message_id)),
+        daemon=True
+    ).start()
+
+def get_message_thread_id_from_id(chat_id: int, message_id: int):
+    try:
+        msg = bot.get_message(chat_id, message_id)
+        return getattr(msg, "message_thread_id", None)
+    except Exception:
+        return None
+
+@bot.message_handler(commands=["aura"])
+def cmd_aura(message: types.Message):
+    """/aura — публично станцевать под музыку: 50% шанс получить +50 ауры, иначе -50."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    log_cmd(uid, username, "aura")
+
+    if uid in THIS_MEN_HATE_FUN_SET:
+        return
+
+    chance = _aura_move_chance(uid)
+    win = random.random() < chance
+    delta = AURA_DANCE_AMOUNT if win else -AURA_DANCE_AMOUNT
+    new_aura = add_aura(uid, delta)
+    disp = get_display_name(message.from_user)
+    emoji = "🕺✨" if win else "😵‍💫💨"
+    text = (
+        f"{emoji} <b>{disp}</b> устроил{'' if message.from_user.first_name is None else ''} публичный танец под музыку!\n"
+        f"{'Поймал вайб и заработал <b>+50</b> ауры.' if win else 'Оступился и потерял <b>-50</b> ауры.'}\n"
+        f"⚡ Текущая аура: <b>{new_aura}</b>"
+    )
+    try:
+        bot.reply_to(message, text, parse_mode="HTML")
+    except Exception as e:
+        log_err("AURA", f"send failed: {e}")
+
+@bot.message_handler(commands=["alab"])
+def cmd_alab(message: types.Message):
+    """/alab — панель аура-лаборатории (луксмаксинг, движения, сила набора ауры)."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    log_cmd(uid, username, "alab")
+    if uid in THIS_MEN_HATE_FUN_SET:
+        return
+    try:
+        bot.reply_to(message, format_alab_text(uid), parse_mode="HTML", reply_markup=alab_keyboard())
+    except Exception as e:
+        log_err("ALAB", f"send panel failed: {e}")
+        bot.reply_to(message, "Не удалось открыть лабораторию.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("alab_up:"))
+def callback_alab_upgrade(call: types.CallbackQuery):
+    uid = str(call.from_user.id)
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        bot.answer_callback_query(call.id, "Ошибка данных.")
+        return
+    stat_key, pay_type = parts[1], parts[2]
+    if stat_key not in ALAB_STAT_NAMES:
+        bot.answer_callback_query(call.id, "Неизвестный параметр.")
+        return
+
+    if pay_type == "b":
+        cost = ALAB_BUTT_COST
+        levels = 1
+        if get_cigarettes(uid) < cost:
+            bot.answer_callback_query(call.id, f"Нужно {cost} окурков!", show_alert=True)
+            return
+        add_cigarettes(uid, -cost)
+        pay_text = f"{cost} окурок(ов)"
+    elif pay_type == "c":
+        cost = ALAB_CIG_COST
+        levels = 3
+        if get_real_cigarettes(uid) < cost:
+            bot.answer_callback_query(call.id, f"Нужно {cost} сигарет(ы)!", show_alert=True)
+            return
+        add_real_cigarettes(uid, -cost)
+        pay_text = f"{cost} сигареты"
+    else:
+        bot.answer_callback_query(call.id, "Неизвестный способ оплаты.")
+        return
+
+    upgraded = alab_upgrade(uid, stat_key, levels)
+    if not upgraded:
+        bot.answer_callback_query(call.id, "Ошибка улучшения.")
+        return
+    name = ALAB_STAT_NAMES[stat_key]
+    bot.answer_callback_query(call.id, f"{name} +{levels}!")
+    try:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=format_alab_text(uid) + f"\n\n✅ <b>{name}</b> улучшено на <b>{levels}</b> ({pay_text})",
+            parse_mode="HTML",
+            reply_markup=alab_keyboard(),
+        )
+    except Exception as e:
+        log_err("ALAB", f"edit panel failed: {e}")
+
+def _rep_change(message: types.Message, delta: int, label: str):
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    log_cmd(uid, username, label)
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        bot.reply_to(message, f"{label.capitalize()} работает только как ответ на сообщение человека.")
+        return
+    target_user = message.reply_to_message.from_user
+    if target_user.is_bot:
+        bot.reply_to(message, "Нельзя менять репутацию боту.")
+        return
+    if str(target_user.id) == uid:
+        bot.reply_to(message, "Себе репутацию менять нельзя.")
+        return
+    if str(target_user.id) in THIS_MEN_HATE_FUN_SET:
+        return
+    get_or_create_user(str(target_user.id))
+    if target_user.username:
+        update_username(str(target_user.id), target_user.username)
+    new_rep = add_reputation(str(target_user.id), delta)
+    disp = get_display_name(target_user)
+    sign = "+" if delta > 0 else "-"
+    try:
+        bot.reply_to(
+            message,
+            f"⭐ Репутация {disp} изменена на {sign}1 → <b>{new_rep}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log_err("REP", f"send rep reply failed: {e}")
+
+@bot.message_handler(commands=["plus"])
+def cmd_plus(message: types.Message):
+    """/plus — +1 репутации в ответ на сообщение."""
+    increment_stat(get_uid(message), "commands")
+    _rep_change(message, 1, "plus")
+
+@bot.message_handler(commands=["minus"])
+def cmd_minus(message: types.Message):
+    """/minus — -1 репутации в ответ на сообщение."""
+    increment_stat(get_uid(message), "commands")
+    _rep_change(message, -1, "minus")
+
+@bot.message_handler(func=lambda m: m.content_type == "text" and (m.text or "").strip() in ("+", "-"), content_types=["text"])
+def handle_plain_plus_minus(message: types.Message):
+    """Если на сообщение человека отвечают просто «+» или «-» — меняем репутацию."""
+    symbol = (message.text or "").strip()
+    if symbol not in ("+", "-"):
+        return
+    delta = 1 if symbol == "+" else -1
+    _rep_change(message, delta, "rep_symbol")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry Point
