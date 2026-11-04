@@ -496,6 +496,30 @@ def create_tables():
     ALTER TABLE users ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMP DEFAULT NULL;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS crypto_balance REAL DEFAULT 0;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS aura INTEGER DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS reputation INTEGER DEFAULT 0;
+
+    -- Aura Lab (аура-лаборатория): луксмаксинг, движения, сила набора ауры
+    CREATE TABLE IF NOT EXISTS aura_lab (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        luxmaxing INTEGER NOT NULL DEFAULT 0,
+        moves INTEGER NOT NULL DEFAULT 0,
+        power INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Активные вызовы на аура-батл (/ab)
+    CREATE TABLE IF NOT EXISTS aura_battles (
+        id SERIAL PRIMARY KEY,
+        challenger_id TEXT NOT NULL,
+        opponent_id TEXT NOT NULL,
+        chat_id BIGINT NOT NULL,
+        message_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_aura_battles_pending
+        ON aura_battles (challenger_id, opponent_id) WHERE status = 'pending';
 
     -- Items table for user inventory
     CREATE TABLE IF NOT EXISTS user_items (
@@ -1232,10 +1256,11 @@ def get_or_create_user(uid: str) -> dict:
     """Get user from DB, create if not exists."""
     uid = str(uid)
     
-    # ДОБАВИЛИ hate_fun В КОНЕЦ ЗАПРОСА (теперь это 14-е поле, индекс 13)
+    # ДОБАВИЛИ hate_fun, aura, reputation В КОНЕЦ ЗАПРОСА (теперь это 14-16 поля, индексы 13-15)
     result = db_execute(
         "SELECT id, username, role, cigarettes, rubles, real_cigarettes, "
-        "clan_id, dead, last_trash, stats, awards, first_message_at, crypto_balance, hate_fun "
+        "clan_id, dead, last_trash, stats, awards, first_message_at, crypto_balance, hate_fun, "
+        "aura, reputation "
         "FROM users WHERE id = %s",
         (uid,), fetch=True, fetch_one=True
     )
@@ -1258,6 +1283,8 @@ def get_or_create_user(uid: str) -> dict:
             "first_message_at": result[11],
             "crypto_balance": float(result[12] or 0),
             "hate_fun": bool(result[13]), # Принудительно приводим к bool для стабильности
+            "aura": int(result[14] or 0),
+            "reputation": int(result[15] or 0),
         }
 
     # Create new user
@@ -1270,7 +1297,8 @@ def get_or_create_user(uid: str) -> dict:
     # ДОБАВИЛИ дефолтные crypto_balance и hate_fun в возврат, чтобы у новых юзеров не было KeyError в коде
     return {"id": uid, "username": "", "role": "default", "cigarettes": 0, "rubles": 0,
             "real_cigarettes": 0, "clan_id": None, "dead": False, "last_trash": 0,
-            "stats": default_stats, "awards": [], "first_message_at": None, "crypto_balance": 0.0, "hate_fun": False}
+            "stats": default_stats, "awards": [], "first_message_at": None, "crypto_balance": 0.0, "hate_fun": False,
+            "aura": 0, "reputation": 0}
 
 def update_user(uid: str, **kwargs) -> None:
     """Update user fields."""
@@ -1380,6 +1408,166 @@ def can_collect_trash(uid: str) -> tuple[bool, int]:
 
 def set_trash_time(uid: str) -> None:
     update_user(uid, last_trash=time.time())
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Aura / Reputation helpers (аура-батлы, /aura, /alab, +/- репутация)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_aura(uid: str) -> int:
+    try:
+        row = db_execute("SELECT aura FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        log_err("AURA", f"get_aura failed for {uid}: {e}")
+        return 0
+
+def add_aura(uid: str, amount: int) -> int:
+    """Атомарно меняет ауру (не уходит ниже 0). Возвращает новое значение."""
+    uid = str(uid)
+    get_or_create_user(uid)
+    row = db_execute(
+        "UPDATE users SET aura = GREATEST(COALESCE(aura, 0) + %s, 0) WHERE id = %s RETURNING aura",
+        (int(amount), uid), fetch=True, fetch_one=True
+    )
+    return int(row[0]) if row else 0
+
+def get_reputation(uid: str) -> int:
+    try:
+        row = db_execute("SELECT reputation FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception as e:
+        log_err("REP", f"get_reputation failed for {uid}: {e}")
+        return 0
+
+def add_reputation(uid: str, amount: int) -> int:
+    uid = str(uid)
+    get_or_create_user(uid)
+    row = db_execute(
+        "UPDATE users SET reputation = COALESCE(reputation, 0) + %s WHERE id = %s RETURNING reputation",
+        (int(amount), uid), fetch=True, fetch_one=True
+    )
+    return int(row[0]) if row else 0
+
+# ── Аура-лаборатория (/alab): луксмаксинг, движения, сила набора ауры ──
+
+ALAB_STAT_NAMES = {"lux": "✨ Луксмаксинг", "moves": "🕺 Движения", "power": "💪 Сила набора ауры"}
+ALAB_BUTT_COST = 25   # окурки за 1 уровень улучшения
+ALAB_CIG_COST = 1     # сигареты за 3 уровня улучшения
+
+def get_alab(uid: str) -> dict:
+    uid = str(uid)
+    get_or_create_user(uid)
+    row = db_execute(
+        "INSERT INTO aura_lab (user_id) VALUES (%s) "
+        "ON CONFLICT (user_id) DO NOTHING RETURNING user_id",
+        (uid,), fetch=True, fetch_one=True
+    )
+    row = db_execute(
+        "SELECT luxmaxing, moves, power FROM aura_lab WHERE user_id = %s",
+        (uid,), fetch=True, fetch_one=True
+    )
+    if not row:
+        return {"lux": 0, "moves": 0, "power": 0}
+    return {"lux": int(row[0]), "moves": int(row[1]), "power": int(row[2])}
+
+def alab_upgrade(uid: str, stat_key: str, levels: int) -> Optional[dict]:
+    if stat_key not in ALAB_STAT_NAMES:
+        return None
+    col = {"lux": "luxmaxing", "moves": "moves", "power": "power"}[stat_key]
+    try:
+        db_execute(
+            f"INSERT INTO aura_lab (user_id, {col}) VALUES (%s, %s) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {col} = aura_lab.{col} + EXCLUDED.{col}, updated_at = CURRENT_TIMESTAMP",
+            (str(uid), int(levels)),
+        )
+        return get_alab(uid)
+    except Exception as e:
+        log_err("ALAB", f"upgrade failed for {uid}: {e}")
+        return None
+
+def format_alab_text(uid: str) -> str:
+    lab = get_alab(uid)
+    aura = get_aura(uid)
+    mult = 1.0 + 0.05 * lab["power"]
+    return (
+        f"🧬 <b>АУРА-ЛАБОРАТОРИЯ</b>\n\n"
+        f"⚡ Твоя аура: <b>{aura}</b> (до победы в батле — <b>500</b>)\n\n"
+        f"✨ <b>Луксмаксинг:</b> ур. <b>{lab['lux']}</b>\n"
+        f"   <i>Стиль, шик, холодный взгляд. Пассивно усиливает ауру, капающую с батлов (+2% за уровень).</i>\n"
+        f"🕺 <b>Движения:</b> ур. <b>{lab['moves']}</b>\n"
+        f"   <i>Танцы и флекс. Увеличивает шанс успеха в /aura (+2% за уровень).</i>\n"
+        f"💪 <b>Сила набора ауры:</b> ур. <b>{lab['power']}</b>\n"
+        f"   <i>Множитель выигрыша ауры на батлах: ×{mult:.2f}.</i>\n\n"
+        f"<i>Улучшения: 🚬 {ALAB_BUTT_COST} окурков = +1 уровень, 💵 {ALAB_CIG_COST} сигарета = +3 уровня.</i>"
+    )
+
+def alab_keyboard() -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for key, name in ALAB_STAT_NAMES.items():
+        markup.insert(types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"))
+        markup.insert(types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"))
+    return markup
+
+def _aura_mult_for_battle(uid: str) -> float:
+    """Множитель выигрыша ауры на батле: сила набора + луксмаксинг."""
+    lab = get_alab(uid)
+    return 1.0 + 0.05 * lab["power"] + 0.02 * lab["lux"]
+
+def _aura_move_chance(uid: str) -> float:
+    """Шанс успешного танца в /aura: 50% + 2% за уровень движений (макс. 75%)."""
+    lab = get_alab(uid)
+    return min(0.5 + 0.02 * lab["moves"], 0.75)
+
+def get_pending_battles_for(uid: str) -> list:
+    try:
+        return db_execute(
+            "SELECT id, challenger_id, opponent_id, chat_id, message_id FROM aura_battles "
+            "WHERE status = 'pending' AND (challenger_id = %s OR opponent_id = %s)",
+            (str(uid), str(uid)), fetch=True
+        ) or []
+    except Exception as e:
+        log_err("ABATTLE", f"get_pending failed: {e}")
+        return []
+
+def create_battle_challenge(challenger_id: str, opponent_id: str, chat_id: int, message_id: int) -> bool:
+    try:
+        db_execute(
+            "INSERT INTO aura_battles (challenger_id, opponent_id, chat_id, message_id) VALUES (%s, %s, %s, %s)",
+            (str(challenger_id), str(opponent_id), int(chat_id), int(message_id)),
+        )
+        return True
+    except Exception as e:
+        log_err("ABATTLE", f"create challenge failed: {e}")
+        return False
+
+def resolve_battle_request(bid: int) -> bool:
+    """Атомарно забирает pending-запрос (защита от двойного принятия). True — если запрос наш."""
+    try:
+        row = db_execute(
+            "UPDATE aura_battles SET status = 'accepted' WHERE id = %s AND status = 'pending' RETURNING id",
+            (int(bid),), fetch=True, fetch_one=True
+        )
+        return row is not None
+    except Exception as e:
+        log_err("ABATTLE", f"resolve request failed: {e}")
+        return False
+
+def close_battle(bid: int, status: str) -> None:
+    try:
+        db_execute("UPDATE aura_battles SET status = %s WHERE id = %s", (status, int(bid)))
+    except Exception as e:
+        log_err("ABATTLE", f"close battle failed: {e}")
+
+def get_battle_by_message(chat_id: int, message_id: int) -> Optional[tuple]:
+    try:
+        return db_execute(
+            "SELECT id, challenger_id, opponent_id FROM aura_battles "
+            "WHERE chat_id = %s AND message_id = %s AND status = 'pending'",
+            (int(chat_id), int(message_id)), fetch=True, fetch_one=True
+        )
+    except Exception as e:
+        log_err("ABATTLE", f"get_battle_by_message failed: {e}")
+        return None
 
 def get_stats(uid: str) -> dict:
     user = get_or_create_user(uid)
@@ -4056,6 +4244,11 @@ COMMAND_LIST = [
     "/reminders - список напоминаний",
     "/delremind - удалить напоминание",
     "/stats - статистика (своя или чужая, с графиком)",
+    "/ab - вызвать человека на аура-батл (в ответ на сообщение или /ab username)",
+    "/aura - публично потанцевать под музыку: 50% +50 ауры / 50% -50 ауры",
+    "/alab - аура-лаборатория: луксмаксинг, движения, сила набора ауры",
+    "/plus - повысить репутацию человека на 1 (в ответ на сообщение)",
+    "/minus - понизить репутацию человека на 1 (в ответ на сообщение)",
     "/top_chat - топ общительных в этом чате",
     "/top_bot - топ общительных с ботом",
     "/say - отправить сообщение без изменений",
@@ -4070,6 +4263,14 @@ COMMAND_LIST = [
     "/mines - игра Мины (ставка на окурки/рубли/сигареты)",
     "/cr - казино-рулетка (ставка на цвет или число)",
     "/bj - блэкджек (ставка на окурки/рубли/сигареты)",
+]
+
+AURA_COMMANDS = [
+    "/ab - вызов на аура-батл (ответь на сообщение человека или /ab username)",
+    "/aura - публично танцуй под музыку: шанс 50% получить 50 ауры, иначе потерять 50",
+    "/alab - аура-лаборатория: луксмаксинг, прокачка движений, сила набора ауры",
+    "/plus (+ в ответ на сообщение) - репутация человека +1",
+    "/minus (- в ответ на сообщение) - репутация человека -1",
 ]
 
 VIRUS_COMMANDS = [
@@ -4133,6 +4334,7 @@ def _format_sections(sections) -> str:
 def format_commands_part1() -> str:
     return _format_sections([
         ("Основное", COMMAND_LIST),
+        ("Аура-батлы", AURA_COMMANDS),
         ("Патогены", VIRUS_COMMANDS),
         ("Кланы", CLAN_COMMANDS),
         ("Экономика", ECONOMY_COMMANDS),
@@ -4631,6 +4833,9 @@ def start_menu_keyboard(page: int = 0) -> types.InlineKeyboardMarkup:
         ("ihatefun", "Отключить реакции от бота"),
         ("join_clan", "Вступить в клан"),
         ("jpeg", "Ухудшить качество"),
+        ("ab", "Вызвать на аура-батл"),
+        ("alab", "Аура-лаборатория"),
+        ("aura", "Потанцевать за ауру"),
         ("lab", "Лаборатория вируса"),
         ("leaderboard", "Топ игроков"),
         ("leave_clan", "Покинуть клан"),
@@ -4734,6 +4939,9 @@ def get_start_text(page: int = 0, name: str = "друг") -> str:
         ("ihatefun", "Отключить реакции для бота"),
         ("join_clan", "Вступить в клан"),
         ("jpeg", "Ухудшить качество"),
+        ("ab", "Вызвать на аура-батл"),
+        ("alab", "Аура-лаборатория"),
+        ("aura", "Потанцевать за ауру"),
         ("lab", "Лаборатория вируса"),
         ("leaderboard", "Топ игроков"),
         ("leave_clan", "Покинуть клан"),
@@ -6328,6 +6536,8 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
     cigs = get_cigarettes(target_uid)
     rubles = get_rubles(target_uid)
     real_cigs = get_real_cigarettes(target_uid)
+    aura_val = get_aura(target_uid)
+    rep_val = get_reputation(target_uid)
     role_key = get_user_role(target_uid)
     roles = get_all_roles(target_uid)
     current_role = roles.get(role_key, {}).get("name", "Обычный ассистент")
@@ -6367,6 +6577,8 @@ def _build_stats_text(target_uid: str, owner_label: str) -> str:
         f"🎭 Роль: <b>{current_role}</b>\n"
         f"{clan_text}\n"
         f"💀 Статус: {'Мёртв' if is_user_dead(target_uid) else 'Жив'}\n\n"
+        f"⚡ Уровень ауры: <b>{_fmt_num(aura_val)}</b> (победа в батле на >500)\n"
+        f"⭐ Репутация: <b>{_fmt_num(rep_val)}</b>\n\n"
         f"🚬 Окурки: <b>{_fmt_num(cigs)}</b>\n"
         f"💰 Рубли: <b>{_fmt_num(rubles)}₽</b>\n"
         f"🚬 Сигареты: <b>{_fmt_num(real_cigs)}</b>\n\n"
