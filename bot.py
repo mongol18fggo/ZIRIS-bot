@@ -67,7 +67,9 @@ TWO_MODEL = "qwen-plus"                       # основная модель д
 TWO_VISION = "qwen-vl-max"                    # vision-модель для описания изображений
 
 # Перечислите здесь ID тех, кого нужно полностью игнорировать
-THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ] 
+THIS_MEN_HATE_FUN = [8771257568, 8793161267, 8024369102, 6481464853, 7020783869, ]
+# Множество строковых ID для проверок в аура-системе (uid там хранится как str)
+THIS_MEN_HATE_FUN_SET = {str(x) for x in THIS_MEN_HATE_FUN} 
 BOT_TOKEN = ""  # Set via config.json or BOT_TOKEN env var
 PROXY_URL = "45.38.107.97:6014"  # Set to None to disable proxy
 AI_DELAY = 2  # Seconds to wait before AI response
@@ -174,7 +176,7 @@ from collections import deque
 from datetime import datetime, date
 from typing import Optional
 import urllib.request
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, ProxyHandler
 
 import psycopg2
 from psycopg2 import pool
@@ -6340,12 +6342,7 @@ def cmd_translate(message: types.Message):
         set_reply_context(message)
         try:
             prompt = f"Translate the following Russian text to English. Reply ONLY with the translation.\n\n{text}"
-            response = ai_client.chat.completions.create(
-                model="",
-                messages=[{"role": "user", "content": prompt}],
-                web_search=False,
-            )
-            translation = response.choices[0].message.content.strip()
+            translation = ai_chat_completion(CHAT_MODEL, [{"role": "user", "content": prompt}], debug_tag="TRANSLATE")
             bot.delete_message(message.chat.id, wait_msg.message_id)
             bot.reply_to(message, f"🌐 <b>Перевод:</b>\n\n<i>Оригинал:</i> {text}\n<i>Перевод:</i> {translation}")
         except Exception as e:
@@ -9788,19 +9785,19 @@ def callback_shop_buy(call: types.CallbackQuery):
     
     # Check user balance
     if currency == "rubles":
-        user_rubles = get_user_rubles(uid)
+        user_rubles = get_rubles(uid)
         if user_rubles < price:
             bot.answer_callback_query(call.id, f"Недостаточно рублей! Нужно {price}, у тебя {user_rubles}", show_alert=True)
             return
         # Deduct rubles
-        set_user_rubles(uid, user_rubles - price)
+        add_rubles(uid, -price)
     elif currency in ("butts", "cigarettes"):
-        user_butts = get_user_cigarettes(uid)
+        user_butts = get_cigarettes(uid)
         if user_butts < price:
             bot.answer_callback_query(call.id, f"Недостаточно окурков! Нужно {price}, у тебя {user_butts}", show_alert=True)
             return
         # Deduct butts
-        set_user_cigarettes(uid, user_butts - price)
+        add_cigarettes(uid, -price)
     else:
         bot.answer_callback_query(call.id, "Неизвестная валюта.")
         return
