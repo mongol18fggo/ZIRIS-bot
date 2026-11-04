@@ -1504,13 +1504,14 @@ def format_alab_text(uid: str) -> str:
     )
 
 def alab_keyboard() -> types.InlineKeyboardMarkup:
-    rows = []
+    # pyTelegramBotAPI: .row(*buttons) добавляет кнопки одной строкой без учёта row_width
+    markup = types.InlineKeyboardMarkup()
     for key, name in ALAB_STAT_NAMES.items():
-        rows.append([
+        markup.row(
             types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"),
             types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"),
-        ])
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+    return markup
 
 def _aura_mult_for_battle(uid: str) -> float:
     """Множитель выигрыша ауры на батле: сила набора + луксмаксинг."""
@@ -10559,13 +10560,12 @@ def _resolve_user_by_username(username: str):
     return uid, disp
 
 def _battle_markup(bid: int) -> types.InlineKeyboardMarkup:
-    rows = [
-        [
-            types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"),
-            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"),
-        ]
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"),
+        types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"),
+    )
+    return markup
 
 def _run_battle_rounds(challenger_uid: str, opponent_uid: str, chat_id: int, message_id: int, thread_id=None):
     """Симулирует раунды аура-батла; первый, чья аура превысит AURA_WIN_THRESHOLD, побеждает,
