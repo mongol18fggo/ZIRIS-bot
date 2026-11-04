@@ -500,6 +500,7 @@ def create_tables():
     ALTER TABLE users ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS aura INTEGER DEFAULT 0;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS reputation INTEGER DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_aura_dance BIGINT DEFAULT 0;
 
     -- Aura Lab (аура-лаборатория): луксмаксинг, движения, сила набора ауры
     CREATE TABLE IF NOT EXISTS aura_lab (
@@ -510,7 +511,7 @@ def create_tables():
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- Активные вызовы на аура-батл (/ab)
+    -- Аура-батлы (/ab): пошаговые, статусы pending/accepted/declined/finished/cancelled
     CREATE TABLE IF NOT EXISTS aura_battles (
         id SERIAL PRIMARY KEY,
         challenger_id TEXT NOT NULL,
@@ -518,6 +519,8 @@ def create_tables():
         chat_id BIGINT NOT NULL,
         message_id INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
+        turn_uid TEXT,
+        log TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_aura_battles_pending
@@ -828,11 +831,17 @@ def create_tables():
         migrate_daily_chat_activity()
         migrate_crypto_market()
         migrate_central_bank()
+        migrate_aura_battles()
         log_info("DB", "Tables created/verified successfully")
         init_crypto_market()
     except Exception as e:
         log_err("DB", f"Failed to create tables: {e}")
         raise
+
+def migrate_aura_battles() -> None:
+    """Add turn-by-turn battle state columns to aura_battles on existing databases."""
+    db_execute("ALTER TABLE aura_battles ADD COLUMN IF NOT EXISTS turn_uid TEXT")
+    db_execute("ALTER TABLE aura_battles ADD COLUMN IF NOT EXISTS log TEXT NOT NULL DEFAULT ''")
 
 def migrate_daily_chat_activity() -> None:
     """Add per-chat tracking to daily_chat_activity on existing databases."""
@@ -1433,6 +1442,37 @@ def add_aura(uid: str, amount: int) -> int:
     )
     return int(row[0]) if row else 0
 
+# ── Кулдаун /aura: один танец в сутки ──
+AURA_DANCE_COOLDOWN_SEC = 24 * 60 * 60  # 1 день
+
+def _fmt_hms(seconds: int) -> str:
+    """Читает секунды в 'Xч Yм Zс' (без нулевых старших частей)."""
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if h:
+        parts.append(f"{h} ч")
+    if m or h:
+        parts.append(f"{m} мин")
+    parts.append(f"{s} с")
+    return " ".join(parts)
+
+def get_last_aura_dance(uid: str) -> int:
+    """Возвращает unix-время последнего танца в /aura (0 если не танцевал)."""
+    try:
+        row = db_execute("SELECT COALESCE(last_aura_dance, 0) FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
+        return int(row[0] or 0) if row else 0
+    except Exception as e:
+        log_err("AURA", f"get_last_aura_dance failed for {uid}: {e}")
+        return 0
+
+def set_last_aura_dance(uid: str, ts: int | None = None) -> None:
+    try:
+        db_execute("UPDATE users SET last_aura_dance = %s WHERE id = %s", (int(ts if ts is not None else time.time()), str(uid)))
+    except Exception as e:
+        log_err("AURA", f"set_last_aura_dance failed for {uid}: {e}")
+
 def get_reputation(uid: str) -> int:
     try:
         row = db_execute("SELECT reputation FROM users WHERE id = %s", (str(uid),), fetch=True, fetch_one=True)
@@ -1504,10 +1544,13 @@ def format_alab_text(uid: str) -> str:
     )
 
 def alab_keyboard() -> types.InlineKeyboardMarkup:
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    # pyTelegramBotAPI: .row(*buttons) добавляет кнопки одной строкой без учёта row_width
+    markup = types.InlineKeyboardMarkup()
     for key, name in ALAB_STAT_NAMES.items():
-        markup.insert(types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"))
-        markup.insert(types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"))
+        markup.row(
+            types.InlineKeyboardButton(f"{name} +1 🚬", callback_data=f"alab_up:{key}:b"),
+            types.InlineKeyboardButton(f"{name} +3 💵", callback_data=f"alab_up:{key}:c"),
+        )
     return markup
 
 def _aura_mult_for_battle(uid: str) -> float:
@@ -1541,6 +1584,51 @@ def create_battle_challenge(challenger_id: str, opponent_id: str, chat_id: int, 
     except Exception as e:
         log_err("ABATTLE", f"create challenge failed: {e}")
         return False
+
+def start_turn_battle(bid: int, first_turn_uid: str) -> bool:
+    """Переводит принятый вызов в пошаговый режим: у обоих 0 ауры на время батла,
+    первый ход — у инициатора вызова. Возвращает True при успехе."""
+    try:
+        row = db_execute(
+            "UPDATE aura_battles SET status = 'active', turn_uid = %s, log = '' "
+            "WHERE id = %s AND status = 'accepted' RETURNING challenger_id, opponent_id",
+            (str(first_turn_uid), int(bid)), fetch=True, fetch_one=True
+        )
+        if not row:
+            return False
+        for uid in (str(row[0]), str(row[1])):
+            update_user(str(uid), aura=0)
+        return True
+    except Exception as e:
+        log_err("ABATTLE", f"start_turn_battle failed: {e}")
+        return False
+
+def get_active_battle_for(uid: str) -> Optional[tuple]:
+    """Возвращает (bid, challenger_id, opponent_id, chat_id, message_id, turn_uid, log) активного батла пользователя."""
+    try:
+        return db_execute(
+            "SELECT id, challenger_id, opponent_id, chat_id, message_id, turn_uid, log FROM aura_battles "
+            "WHERE status = 'active' AND (challenger_id = %s OR opponent_id = %s) ORDER BY id DESC LIMIT 1",
+            (str(uid), str(uid)), fetch=True, fetch_one=True
+        )
+    except Exception as e:
+        log_err("ABATTLE", f"get_active_battle_for failed: {e}")
+        return None
+
+def set_battle_turn(bid: int, next_uid: str) -> None:
+    try:
+        db_execute("UPDATE aura_battles SET turn_uid = %s WHERE id = %s", (str(next_uid), int(bid)))
+    except Exception as e:
+        log_err("ABATTLE", f"set_battle_turn failed: {e}")
+
+def append_battle_log(bid: int, line: str) -> None:
+    try:
+        db_execute(
+            "UPDATE aura_battles SET log = CASE WHEN log = '' THEN %s ELSE log || E'\\n' || %s END WHERE id = %s",
+            (line, line, int(bid))
+        )
+    except Exception as e:
+        log_err("ABATTLE", f"append_battle_log failed: {e}")
 
 def resolve_battle_request(bid: int) -> bool:
     """Атомарно забирает pending-запрос (защита от двойного принятия). True — если запрос наш."""
@@ -4246,8 +4334,8 @@ COMMAND_LIST = [
     "/reminders - список напоминаний",
     "/delremind - удалить напоминание",
     "/stats - статистика (своя или чужая, с графиком)",
-    "/ab - вызвать человека на аура-батл (в ответ на сообщение или /ab username)",
-    "/aura - публично потанцевать под музыку: 50% +50 ауры / 50% -50 ауры",
+    "/ab - аура-батл: вызов в ответ на сообщение или /ab username (пошаговый бой, до 500 ауры)",
+    "/aura - публично потанцевать под музыку: 50% +50 ауры / 50% -50 ауры (раз в сутки)",
     "/alab - аура-лаборатория: луксмаксинг, движения, сила набора ауры",
     "/plus - повысить репутацию человека на 1 (в ответ на сообщение)",
     "/minus - понизить репутацию человека на 1 (в ответ на сообщение)",
@@ -4268,8 +4356,9 @@ COMMAND_LIST = [
 ]
 
 AURA_COMMANDS = [
-    "/ab - вызов на аура-батл (ответь на сообщение человека или /ab username)",
-    "/aura - публично танцуй под музыку: шанс 50% получить 50 ауры, иначе потерять 50",
+    "/ab - вызов на аура-батл (ответь на сообщение человека или /ab username). Батл пошаговый: у обоих 0 ауры, действия — мьюнинг (+50), красиво двинуться (-20% ауры соперника), страдать хуйней (-аура у обоих). Кто первый пробьёт 500 — победитель, проигравший могнут.",
+    "/bum - секретная команда: в активном батле мгновенно отправляет соперника в больницу (накаут), но ты сам уезжаешь в тюрягу — могнуты оба",
+    "/aura - публично танцуй под музыку: шанс 50% получить 50 ауры, иначе потерять 50 (кулдаун — 1 день)",
     "/alab - аура-лаборатория: луксмаксинг, прокачка движений, сила набора ауры",
     "/plus (+ в ответ на сообщение) - репутация человека +1",
     "/minus (- в ответ на сообщение) - репутация человека -1",
@@ -10557,48 +10646,147 @@ def _resolve_user_by_username(username: str):
     return uid, disp
 
 def _battle_markup(bid: int) -> types.InlineKeyboardMarkup:
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.insert(types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"))
-    markup.insert(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"))
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ Принять батл", callback_data=f"ab_yes:{bid}"),
+        types.InlineKeyboardButton("❌ Отклонить", callback_data=f"ab_no:{bid}"),
+    )
     return markup
 
-def _run_battle_rounds(challenger_uid: str, opponent_uid: str, chat_id: int, message_id: int, thread_id=None):
-    """Симулирует раунды аура-батла; первый, чья аура превысит AURA_WIN_THRESHOLD, побеждает,
-    проигравший становится мёртвым (нужен /revive)."""
-    try:
-        c_aura = get_aura(challenger_uid)
-        o_aura = get_aura(opponent_uid)
-        c_mult = _aura_mult_for_battle(challenger_uid)
-        o_mult = _aura_mult_for_battle(opponent_uid)
-        rounds_log = []
-        max_rounds = 60
-        for r in range(1, max_rounds + 1):
-            c_gain = random.randint(30, 90) * c_mult
-            o_gain = random.randint(30, 90) * o_mult
-            c_aura += int(c_gain)
-            o_aura += int(o_gain)
-            rounds_log.append(f"Раунд {r}: ⚡ {int(c_gain)} vs {int(o_gain)} ⚡")
-            if c_aura > AURA_WIN_THRESHOLD or o_aura > AURA_WIN_THRESHOLD:
-                break
-        winner_uid, loser_uid = (challenger_uid, opponent_uid) if c_aura >= o_aura else (opponent_uid, challenger_uid)
-        add_aura(winner_uid, c_aura - get_aura(winner_uid))
-        add_aura(loser_uid, o_aura - get_aura(loser_uid))
-        set_user_dead(loser_uid, True)
-        close_battle_by_message(chat_id, message_id)
-        w_disp = get_display_name_of_uid(winner_uid)
-        l_disp = get_display_name_of_uid(loser_uid)
+# ── Пошаговые действия в батле ──
+AB_MUTE_GAIN_MIN, AB_MUTE_GAIN_MAX = 35, 65      # мьюнинг: стабильный набор (~50 ±25%)
+AB_SUFFER_SELF_MIN, AB_SUFFER_SELF_MAX = 10, 40  # страдание хуйней: теряешь сам
+AB_SUFFER_FOE_MIN, AB_SUFFER_FOE_MAX = 15, 45    # и теряешь ты, и соперник
+
+def _action_markup(bid: int) -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("🤫 Мьюнинг +50", callback_data=f"abact:mute:{bid}"),
+        types.InlineKeyboardButton("🕺 Красиво двинуться", callback_data=f"abact:dance:{bid}"),
+    )
+    markup.row(
+        types.InlineKeyboardButton("😖 Страдать хуйней", callback_data=f"abact:suffer:{bid}"),
+        types.InlineKeyboardButton("🏳️ Сдаться", callback_data=f"abact:ff:{bid}"),
+    )
+    return markup
+
+def _battle_state_text(challenger_uid: str, opponent_uid: str, turn_uid: str, log_lines: list) -> str:
+    c_aura, o_aura = get_aura(challenger_uid), get_aura(opponent_uid)
+    c_disp, o_disp = get_display_name_of_uid(challenger_uid), get_display_name_of_uid(opponent_uid)
+    cur_disp = get_display_name_of_uid(turn_uid) if turn_uid else "—"
+    log_tail = "\n".join(log_lines[-8:]) if log_lines else "<i>Батл только начался. Оба на нуле.</i>"
+    return (
+        f"⚔️ <b>АУРА-БАТЛ (пошаговый)</b>\n\n"
+        f"{c_disp}: ⚡ <b>{c_aura}</b>\n"
+        f"{o_disp}: ⚡ <b>{o_aura}</b>\n"
+        f"🎯 Цель: первым пробить <b>{AURA_WIN_THRESHOLD}</b> ауры. Проигравший — могнут.\n\n"
+        f"👉 Ходит: <b>{cur_disp}</b>\n\n"
+        f"<b>Действия:</b>\n"
+        f"• 🤫 <b>Мьюнинг</b> — мьютим чат от ауры, +{AB_MUTE_GAIN_MIN}–{AB_MUTE_GAIN_MAX} себе\n"
+        f"• 🕺 <b>Красиво двинуться</b> — стильный танец: −20% ауры соперника\n"
+        f"• 😖 <b>Страдать хуйней</b> — больно всем: −аура у тебя И у соперника\n"
+        f"• 🤫 Секретная команда <code>/bum</code> — мгновенный накаут соперника (но ты уедешь в тюрягу 💀)\n\n"
+        f"<i>Хроника боя:</i>\n{log_tail}"
+    )
+
+def _finish_battle(bid: int, winner_uid: str, loser_uid: str, chat_id: int, message_id: int, thread_id=None, bum_used=False):
+    """Завершает пошаговый батл: накопленная в бою аура уже на счету победителя (0 у проигравшего),
+    проигравший могнут."""
+    close_battle(int(bid), "finished")
+    w_aura = get_aura(winner_uid)
+    set_user_dead(loser_uid, True)
+    add_reputation(loser_uid, -1)
+    if not bum_used:
+        add_reputation(winner_uid, 1)
+    w_disp = get_display_name_of_uid(winner_uid)
+    l_disp = get_display_name_of_uid(loser_uid)
+    if bum_used:
+        text = (
+            f"💀🚔 <b>НАКАУТ ЧЕРЕЗ /bum</b>\n\n"
+            f"<b>{l_disp}</b> применил секретную команду /bum — <b>{w_disp}</b> улетел прямо в больницу!\n"
+            f"Но за это сам {l_disp} едет в тюрягу.\n\n"
+            f"🏆 Формальный победитель: <b>{w_disp}</b> (аура <b>{w_aura}</b>)\n"
+            f"💀 Могнуты оба: <b>{w_disp}</b> и <b>{l_disp}</b> — спасайтесь через /revive."
+        )
+        # взаимный могнут: инициатор /bum тоже уходит в нокаут (в больницу и в тюрягу)
+        set_user_dead(winner_uid, True)
+        add_reputation(winner_uid, -1)
+    else:
         text = (
             f"⚔️ <b>АУРА-БАТЛ ОКОНЧЕН</b>\n\n"
-            f"🏆 Победитель: <b>{w_disp}</b> (аура {get_aura(winner_uid)})\n"
-            f"💀 Могнут: <b>{l_disp}</b> (аура {get_aura(loser_uid)})\n\n"
-            f"<i>Раунды:</i>\n" + "\n".join(rounds_log[-10:])
+            f"🏆 Победитель: <b>{w_disp}</b> (аура <b>{w_aura}</b>)\n"
+            f"💀 Могнут: <b>{l_disp}</b> (аура <b>{get_aura(loser_uid)}</b>)\n\n"
+            f"Проигравший нужен /revive, чтобы вернуться к жизни."
         )
-        try:
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_to_message_id=message_id, message_thread_id=thread_id)
-        except Exception as e:
-            log_err("ABATTLE", f"send result failed: {e}")
+    try:
+        bot.send_message(chat_id, text, parse_mode="HTML", reply_to_message_id=message_id, message_thread_id=thread_id)
     except Exception as e:
-        log_err("ABATTLE", f"battle rounds crashed: {e}")
+        log_err("ABATTLE", f"send result failed: {e}")
+
+def _apply_battle_action(bid: int, actor_uid: str, action: str, chat_id: int, message_id: int, thread_id=None):
+    """Выполняет ход одного из участников пошагового батла и передаёт ход противнику."""
+    row = db_execute(
+        "SELECT challenger_id, opponent_id, status, turn_uid FROM aura_battles WHERE id = %s",
+        (int(bid),), fetch=True, fetch_one=True
+    )
+    if not row or str(row[2]) != "active":
+        return "Этот батл уже завершён."
+    challenger_id, opponent_id, _, turn_uid = str(row[0]), str(row[1]), str(row[2]), str(row[3] or "")
+    if actor_uid not in (challenger_id, opponent_id):
+        return "Ты не участник этого батла."
+    if turn_uid and actor_uid != turn_uid:
+        return "Сейчас не твой ход, подожди 👀"
+    other_uid = opponent_id if actor_uid == challenger_id else challenger_id
+    me_disp = get_display_name_of_uid(actor_uid)
+    foe_disp = get_display_name_of_uid(other_uid)
+    my_aura, foe_aura = get_aura(actor_uid), get_aura(other_uid)
+    mult = _aura_mult_for_battle(actor_uid)
+
+    if action == "mute":
+        gain = int(random.randint(AB_MUTE_GAIN_MIN, AB_MUTE_GAIN_MAX) * mult)
+        new_my = add_aura(actor_uid, gain)
+        line = f"🤫 {me_disp} замьютил чат от ауры → +{gain} (теперь {new_my})"
+    elif action == "dance":
+        steal = max(1, int(foe_aura * 0.20))
+        new_foe = add_aura(other_uid, -steal)
+        line = f"🕺 {me_disp} красиво двинулся! Стиль сочится: −{steal} ауры у {foe_disp} (у того {new_foe})"
+    elif action == "suffer":
+        self_loss = random.randint(AB_SUFFER_SELF_MIN, AB_SUFFER_SELF_MAX)
+        foe_loss = random.randint(AB_SUFFER_FOE_MIN, AB_SUFFER_FOE_MAX)
+        new_my = add_aura(actor_uid, -self_loss)
+        new_foe = add_aura(other_uid, -foe_loss)
+        line = f"😖 {me_disp} страдает хуйней: −{self_loss} себе (осталось {new_my}), −{foe_loss} у {foe_disp} (осталось {new_foe})"
+    elif action == "ff":
+        _finish_battle(bid, other_uid, actor_uid, chat_id, message_id, thread_id)
+        return None
+    else:
+        return "Неизвестное действие."
+
+    append_battle_log(bid, line)
+
+    my_now, foe_now = get_aura(actor_uid), get_aura(other_uid)
+    if my_now > AURA_WIN_THRESHOLD:
+        _finish_battle(bid, actor_uid, other_uid, chat_id, message_id, thread_id)
+        return None
+    if foe_now > AURA_WIN_THRESHOLD:
+        _finish_battle(bid, other_uid, actor_uid, chat_id, message_id, thread_id)
+        return None
+
+    set_battle_turn(bid, other_uid)
+    try:
+        log_lines = []
+        updated = db_execute("SELECT log FROM aura_battles WHERE id = %s", (int(bid),), fetch=True, fetch_one=True)
+        if updated and updated[0]:
+            log_lines = str(updated[0]).split("\n")
+        text = _battle_state_text(challenger_id, opponent_id, other_uid, log_lines)
+        bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=text, parse_mode="HTML",
+            reply_markup=_action_markup(bid),
+        )
+    except Exception as e:
+        log_err("ABATTLE", f"panel update after action failed: {e}")
+    return None
 
 def get_display_name_of_uid(uid: str) -> str:
     u = get_or_create_user(str(uid))
@@ -10722,19 +10910,77 @@ def callback_ab_resolve(call: types.CallbackQuery):
         return
 
     bot.answer_callback_query(call.id, "Батл начался!")
+
+    # пошаговый батл: у обоих 0 ауры, первым ходит инициатор вызова
+    if not start_turn_battle(bid, challenger_id):
+        bot.answer_callback_query(call.id, "Не удалось начать батл.", show_alert=True)
+        return
+
     try:
         bot.edit_message_text(
             chat_id=chat_id, message_id=message_id,
-            text=f"⚔️ Батл принят! Начинаем обмен аурами…"
+            text=_battle_state_text(challenger_id, opponent_id, challenger_id, []),
+            parse_mode="HTML",
+            reply_markup=_action_markup(bid),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log_err("ABATTLE", f"start panel edit failed: {e}")
 
-    threading.Thread(
-        target=_run_battle_rounds,
-        args=(challenger_id, opponent_id, chat_id, message_id, get_message_thread_id_from_id(chat_id, message_id)),
-        daemon=True
-    ).start()
+@bot.callback_query_handler(func=lambda call: call.data.startswith("abact:"))
+def callback_ab_action(call: types.CallbackQuery):
+    """Пошаговое действие в активном аура-батле (кнопки на панели батла)."""
+    uid = str(call.from_user.id)
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        bot.answer_callback_query(call.id, "Некорректные данные.")
+        return
+    action, bid_s = parts[1], parts[2]
+    try:
+        bid = int(bid_s)
+    except Exception:
+        bot.answer_callback_query(call.id, "Некорректные данные.")
+        return
+
+    row = db_execute(
+        "SELECT chat_id, message_id FROM aura_battles WHERE id = %s AND status = 'active'",
+        (bid,), fetch=True, fetch_one=True
+    )
+    if not row:
+        bot.answer_callback_query(call.id, "Этот батл уже завершён.")
+        return
+    chat_id, message_id = int(row[0]), int(row[1])
+    thread_id = get_message_thread_id_from_id(chat_id, message_id)
+
+    err = _apply_battle_action(bid, uid, action, chat_id, message_id, thread_id)
+    if err:
+        bot.answer_callback_query(call.id, err, show_alert=True)
+    else:
+        bot.answer_callback_query(call.id, "Ход сделан!")
+
+@bot.message_handler(commands=["bum"])
+def cmd_bum(message: types.Message):
+    """/bum — секретная команда: мгновенный накаут соперника в активном батле, но сам автор уезжает в тюрягу (тоже могнут)."""
+    uid = get_uid(message)
+    username = message.from_user.username or message.from_user.first_name or "unknown"
+    increment_stat(uid, "commands")
+    log_cmd(uid, username, "bum")
+
+    if uid in THIS_MEN_HATE_FUN_SET:
+        return
+
+    battle = get_active_battle_for(uid)
+    if not battle:
+        bot.reply_to(message, "🤫 Секретная команда /bum срабатывает только, когда ты находишься в активном аура-батле.\nВызови кого-нибудь через /ab.")
+        return
+    bid, challenger_id, opponent_id, chat_id, message_id, turn_uid, _log = str(battle[0]), str(battle[1]), str(battle[2]), int(battle[3]), int(battle[4]), str(battle[5] or ""), battle[6]
+    if turn_uid and uid != turn_uid:
+        bot.reply_to(message, "Сейчас не твой ход — /bum подождёт 👀")
+        return
+    other_uid = opponent_id if uid == challenger_id else challenger_id
+    thread_id = get_message_thread_id_from_id(chat_id, message_id)
+    append_battle_log(int(bid), f"🚔 {get_display_name_of_uid(uid)} применил /bum — это было подло!")
+    # формальный победитель — противник (он «выжил» по правилам), но могнуты оба
+    _finish_battle(int(bid), other_uid, uid, chat_id, message_id, thread_id, bum_used=True)
 
 def get_message_thread_id_from_id(chat_id: int, message_id: int):
     try:
@@ -10745,7 +10991,7 @@ def get_message_thread_id_from_id(chat_id: int, message_id: int):
 
 @bot.message_handler(commands=["aura"])
 def cmd_aura(message: types.Message):
-    """/aura — публично станцевать под музыку: 50% шанс получить +50 ауры, иначе -50."""
+    """/aura — публично станцевать под музыку: 50% шанс получить +50 ауры, иначе -50. Кулдаун — 1 день."""
     uid = get_uid(message)
     username = message.from_user.username or message.from_user.first_name or "unknown"
     increment_stat(uid, "commands")
@@ -10754,16 +11000,35 @@ def cmd_aura(message: types.Message):
     if uid in THIS_MEN_HATE_FUN_SET:
         return
 
+    # ── Суточный кулдаун ──
+    last_dance = get_last_aura_dance(uid)
+    now_ts = int(time.time())
+    elapsed = now_ts - last_dance
+    if last_dance and elapsed < AURA_DANCE_COOLDOWN_SEC:
+        remaining = AURA_DANCE_COOLDOWN_SEC - elapsed
+        try:
+            bot.reply_to(
+                message,
+                f"⏳ Ты уже танцевал сегодня! Следующий танец через <b>{_fmt_hms(remaining)}</b>.\n"
+                f"Аура фармится не чаще одного раза в сутки. 💃",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            log_err("AURA", f"cooldown send failed: {e}")
+        return
+
     chance = _aura_move_chance(uid)
     win = random.random() < chance
     delta = AURA_DANCE_AMOUNT if win else -AURA_DANCE_AMOUNT
     new_aura = add_aura(uid, delta)
+    set_last_aura_dance(uid, now_ts)
     disp = get_display_name(message.from_user)
     emoji = "🕺✨" if win else "😵‍💫💨"
     text = (
         f"{emoji} <b>{disp}</b> устроил{'' if message.from_user.first_name is None else ''} публичный танец под музыку!\n"
         f"{'Поймал вайб и заработал <b>+50</b> ауры.' if win else 'Оступился и потерял <b>-50</b> ауры.'}\n"
-        f"⚡ Текущая аура: <b>{new_aura}</b>"
+        f"⚡ Текущая аура: <b>{new_aura}</b>\n"
+        f"⏳ Следующий танец через <b>{_fmt_hms(AURA_DANCE_COOLDOWN_SEC)}</b>"
     )
     try:
         bot.reply_to(message, text, parse_mode="HTML")
